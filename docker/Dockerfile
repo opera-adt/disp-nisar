@@ -12,7 +12,7 @@ ARG BASE
 # Label image following opencontainers image-spec annotations recommendation:
 # https://github.com/opencontainers/image-spec/blob/main/annotations.md
 LABEL org.opencontainers.image.description="Container for DISP-NISAR OPERA Workflow"
-LABEL org.opencontainers.image.authors="Sara Mirzaee <smirzaee@jpl.nasa.gov>"
+LABEL org.opencontainers.image.authors="Sara Mirzaee <smirzaee@jpl.nasa.gov>, Scott Staniewicz <scott.j.staniewicz@jpl.nasa.gov>"
 LABEL org.opencontainers.image.url="https://github.com/opera-adt/disp-nisar"
 LABEL org.opencontainers.image.source="https://github.com/opera-adt/disp-nisar"
 LABEL org.opencontainers.image.documentation="https://github.com/opera-adt/disp-nisar"
@@ -68,9 +68,10 @@ RUN micromamba install --yes --channel conda-forge -n base -f /tmp/specfile.txt 
 # Activate, otherwise python will not be found
 # https://github.com/mamba-org/micromamba-docker#running-commands-in-dockerfile-within-the-conda-environment
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
+RUN pip install git+https://github.com/isce-framework/spurt@v0.1.0
 # --no-deps because they are installed with conda
-RUN pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.17.0
-RUN pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.3.0
+RUN pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.16.0
+RUN pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.36.0
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER . .
 RUN python -m pip install --no-deps .

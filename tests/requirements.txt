@@ -1,6 +1,10 @@
+black
+flake8
+pooch
 pre-commit
 pytest
 pytest-cov
-pytest-randomly # control random seed
-pytest-xdist # parallel tests: https://pytest-xdist.readthedocs.io/en/latest/
+pytest-randomly
+pytest-recording
+pytest-xdist
 ruff

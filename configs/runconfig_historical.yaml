@@ -1,0 +1,79 @@
+input_file_group:
+  # REQUIRED: list of paths to CSLC files.
+  #   Type: array.
+  cslc_file_list:
+  # REQUIRED: Frame ID of the bursts contained in `cslc_file_list`.
+  #   Type: integer.
+  frame_id:
+  # REQUIRED: Frequency in which cslcs are acquired.
+  #   Type: string.
+  frequency: frequencyA
+  # REQUIRED: Polarization of the cslcs contained in `cslc_file_list`.
+  #   Type: string.
+  polarization: HH
+dynamic_ancillary_file_group:
+  # REQUIRED: Path to file containing SAS algorithm parameters.
+  #   Type: string.
+  algorithm_parameters_file: algorithm_parameters_historical.yaml
+  # Paths to the CSLC static_layer files (1 per burst) with line-of-sight unit vectors. If
+  #   none provided, corrections using CSLC static_layer are skipped.
+  #   Type: array.
+  mask_file:
+  # Path to the DEM file covering full frame. If none provided, corrections using DEM are
+  #   skipped.
+  #   Type: string | null.
+  dem_file:
+  # List of paths to gunw files for ionosphere correction. They are interferograms and need
+  #   to cover the date range in CSLC data list. If none
+  #   provided, ionosphere corrections are skipped.
+  #   Type: array | null.
+  gunw_files:
+  # List of paths to troposphere weather model files (1 per date). If none provided,
+  #   troposphere corrections are skipped.
+  #   Type: array | null.
+  troposphere_files:
+static_ancillary_file_group:
+  # JSON file containing list of reference date changes for each frame.
+  #   Type: string | null.
+  reference_date_database_json: 
+primary_executable:
+  # Product type of the PGE.
+  #   Type: string.
+  product_type: DISP_NISAR_HISTORICAL
+product_path_group:
+  # REQUIRED: Directory where PGE will place results.
+  #   Type: string.
+  product_path: output/historical
+  # Path to the scratch directory.
+  #   Type: string.
+  scratch_path: scratch/historical
+  # Path to the SAS output directory.
+  #   Type: string.
+  sas_output_path: output/historical
+  # Version of the product, in <major>.<minor> format.
+  #   Type: string.
+  product_version: '0.4'
+  # Whether the SAS should output and save the Compressed SLCs in addition to the standard
+  #   product output.
+  #   Type: boolean.
+  save_compressed_slc: true
+worker_settings:
+  # Whether to use GPU for processing (if available).
+  #   Type: boolean.
+  gpu_enabled: false
+  # Number of threads to use per worker. This sets the OMP_NUM_THREADS environment variable in
+  #   each python process.
+  #   Type: integer.
+  threads_per_worker: 2
+  # If processing separate spatial bursts, number of bursts to run in parallel for wrapped-
+  #   phase-estimation.
+  #   Type: integer.
+  n_parallel_bursts: 1
+  # Size (rows, columns) of blocks of data to load at a time.
+  #   Type: array.
+  block_shape:
+    - 512
+    - 512
+# Path to the output log file in addition to logging to stderr.
+#   Type: string | null.
+log_file: scratch/historical/log_sas.log
