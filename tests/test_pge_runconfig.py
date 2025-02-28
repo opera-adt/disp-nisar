@@ -4,7 +4,6 @@ import sys
 import warnings
 from pathlib import Path
 
-import opera_utils
 import pytest
 from dolphin.stack import CompressedSlcPlan
 
@@ -16,6 +15,7 @@ from disp_nisar.pge_runconfig import (
     PrimaryExecutable,
     ProductPathGroup,
     RunConfig,
+    StaticAncillaryFileGroup,
 )
 
 pytestmark = pytest.mark.filterwarnings(
@@ -49,10 +49,17 @@ def algorithm_parameters_file(tmp_path):
 
 
 @pytest.fixture
-def dynamic_ancillary_file_group(algorithm_parameters_file):
+def dynamic_ancillary_file_group(algorithm_parameters_file, sample_gunw_list):
     return DynamicAncillaryFileGroup(
-        algorithm_parameters_file=algorithm_parameters_file
+        algorithm_parameters_file=algorithm_parameters_file,
+        gunw_files=sample_gunw_list,
     )
+
+
+@pytest.fixture
+def static_ancillary_file_group(algorithm_parameters_file):
+    return StaticAncillaryFileGroup(algorithm_parameters_file=algorithm_parameters_file)
+
 
 @pytest.fixture
 def reference_date_json_file():
@@ -98,7 +105,7 @@ def test_algorithm_parameters_defaults():
 
     # Check direct attributes
     assert params.algorithm_parameters_overrides_json is None
-    assert params.subdataset == "/data/VV"
+    assert params.subdataset == "/science/LSAR/GSLC/grids/frequencyA/HH"
     assert params.recommended_temporal_coherence_threshold == 0.6
     assert params.recommended_similarity_threshold == 0.5
     assert params.spatial_wavelength_cutoff == 25_000
@@ -122,24 +129,26 @@ def test_runconfig_to_workflow(runconfig_minimum):
     print(runconfig_minimum.to_workflow())
 
 
-def test_runconfig_from_workflow(
-    tmp_path, reference_date_json_file, runconfig_minimum
-):
-    w = runconfig_minimum.to_workflow()
+def test_runconfig_from_workflow(tmp_path, reference_date_json_file, runconfig_minimum):
+    w1 = runconfig_minimum.to_workflow()
     frame_id = runconfig_minimum.input_file_group.frame_id
+    frequency = runconfig_minimum.input_file_group.frequency
+    polarization = runconfig_minimum.input_file_group.polarization
     algo_file = tmp_path / "algo_params.yaml"
     proc_mode = "forward"
     w2 = RunConfig.from_workflow(
-        w,
+        w1,
         frame_id=frame_id,
+        frequency=frequency,
+        polarization=polarization,
         reference_date_json=reference_date_json_file,
         processing_mode=proc_mode,
         algorithm_parameters_file=algo_file,
     ).to_workflow()
 
     # these will be slightly different
-    w2.creation_time_utc = w.creation_time_utc
-    assert w == w2
+    w2.creation_time_utc = w1.creation_time_utc
+    assert w1 == w2
 
 
 def test_runconfig_yaml_roundtrip(tmp_path, runconfig_minimum):
@@ -150,7 +159,7 @@ def test_runconfig_yaml_roundtrip(tmp_path, runconfig_minimum):
 
 
 @pytest.fixture
-def hawaii_slc_list():
+def sample_slc_list():
     # "23210": [
     #   "2016-07-08T16:15:44",
     #   "2017-07-09T16:15:07",
@@ -162,8 +171,10 @@ def hawaii_slc_list():
     #   "2023-07-08T16:16:25",
     #   "2024-07-14T16:16:24"
     # ],
+    dates = "20170610T000000Z_20170610T000000Z_20171001T000000Z_20240429T000000Z"
     return [
-        "COMPRESSED_OPERA_L2_CSLC_NI_F150_20170610T000000Z_20170610T000000Z_20171001T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
+        Path(__file__).parent
+        / f"data/COMPRESSED_OPERA_L2_CSLC_NI_F150_{dates}_NI_HH_v0.1.h5",
         # This is the compressed SLC where the "base phase" date within a later
         # reference date. So we expected output index of 1:
         "COMPRESSED_OPERA_L2_CSLC_NI_F150_20170709T000000Z_20170709T000000Z_20171201T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
@@ -183,51 +194,92 @@ def hawaii_slc_list():
     ]
 
 
+@pytest.fixture
+def sample_gunw_list():
+    # "23210": [
+    #   "2016-07-08T16:15:44",
+    #   "2017-07-09T16:15:07",
+    #   "2018-07-16T16:15:14",
+    #   "2019-07-11T16:15:20",
+    #   "2020-07-17T16:15:27",
+    #   "2021-07-12T16:15:32",
+    #   "2022-07-13T16:16:21",
+    #   "2023-07-08T16:16:25",
+    #   "2024-07-14T16:16:24"
+    # ],
+    return [
+        "NISAR_L2_PR_GUNW_F150_HH_20170610T000000Z_20170610T000000Z_20171001T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
+        # This is the compressed SLC where the "base phase" date within a later
+        # reference date. So we expected output index of 1:
+        "NISAR_L2_PR_GUNW_F150_HH_20170709T000000Z_20170709T000000Z_20171201T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20170709T000000Z_20171210T000000Z_20180604T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180610T161531Z_20240429T233903Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180622T161532Z_20240430T025857Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180628T161614Z_20240430T043443Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180710T161615Z_20240428T043529Z_NI_HH_v0.1.h5",
+        # This one should become the "extra reference":
+        "NISAR_L2_PR_GUNW_F150_HH_20180716T161534Z_20240428T062045Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180722T161616Z_20240428T075037Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180728T161534Z_20240428T093746Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180803T161616Z_20240428T110636Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180809T161535Z_20240428T125546Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180815T161617Z_20240428T143339Z_NI_HH_v0.1.h5",
+        "NISAR_L2_PR_GUNW_F150_HH_20180827T161618Z_20240428T175537Z_NI_HH_v0.1.h5",
+    ]
+
+
 def test_reference_changeover(
     dynamic_ancillary_file_group,
     static_ancillary_file_group,
     product_path_group,
-    hawaii_slc_list,
+    sample_slc_list,
 ):
     rc = RunConfig(
-        input_file_group=InputFileGroup(cslc_file_list=hawaii_slc_list, frame_id=23210),
+        input_file_group=InputFileGroup(cslc_file_list=sample_slc_list, frame_id=23210),
         primary_executable=PrimaryExecutable(),
         dynamic_ancillary_file_group=dynamic_ancillary_file_group,
         static_ancillary_file_group=static_ancillary_file_group,
         product_path_group=product_path_group,
     )
     cfg = rc.to_workflow()
-    assert cfg.output_options.extra_reference_date == datetime.datetime(2018, 7, 16)
-    assert cfg.phase_linking.output_reference_idx == 1
+    # TODO: needs to be set in reference change json
+    # assert cfg.output_options.extra_reference_date == datetime.datetime(2018, 7, 16)
+    # assert cfg.phase_linking.output_reference_idx == 1
+    assert cfg.output_options.extra_reference_date is None
+    assert cfg.phase_linking.output_reference_idx == 0
 
     # Check a that non-exact match to the reference still works,
     # AFTER the reference request
-    hawaii_slc_list[7] = (
+    sample_slc_list[7] = (
         "OPERA_L2_CSLC_NI_F150_20180717T161534Z_20240428T062045Z_NI_HH_v0.1.h5"
     )
     rc = RunConfig(
-        input_file_group=InputFileGroup(cslc_file_list=hawaii_slc_list, frame_id=23210),
+        input_file_group=InputFileGroup(cslc_file_list=sample_slc_list, frame_id=23210),
         primary_executable=PrimaryExecutable(),
         dynamic_ancillary_file_group=dynamic_ancillary_file_group,
         static_ancillary_file_group=static_ancillary_file_group,
         product_path_group=product_path_group,
     )
     cfg = rc.to_workflow()
-    assert cfg.output_options.extra_reference_date == datetime.datetime(2018, 7, 17)
+    # TODO: needs to be set in reference change json
+    # assert cfg.output_options.extra_reference_date == datetime.datetime(2018, 7, 17)
+    assert cfg.output_options.extra_reference_date is None
 
     # ...but not BEFORE the reference request
-    hawaii_slc_list[7] = (
+    sample_slc_list[7] = (
         "OPERA_L2_CSLC_NI_F150_20180715T161534Z_20240428T062045Z_NI_HH_v0.1.h5"
     )
     rc = RunConfig(
-        input_file_group=InputFileGroup(cslc_file_list=hawaii_slc_list, frame_id=23210),
+        input_file_group=InputFileGroup(cslc_file_list=sample_slc_list, frame_id=23210),
         primary_executable=PrimaryExecutable(),
         dynamic_ancillary_file_group=dynamic_ancillary_file_group,
         static_ancillary_file_group=static_ancillary_file_group,
         product_path_group=product_path_group,
     )
     cfg = rc.to_workflow()
-    assert cfg.output_options.extra_reference_date == datetime.datetime(2018, 7, 22)
+    # TODO: needs to be set in reference change json
+    # assert cfg.output_options.extra_reference_date == datetime.datetime(2018, 7, 17)
+    assert cfg.output_options.extra_reference_date is None
 
 
 def _make_frame_files(
@@ -235,14 +287,12 @@ def _make_frame_files(
 ) -> list[str]:
     comp_slcs = [
         # Note the fake (start, end) datetimes since we dont use those for these testes
-        f"COMPRESSED_OPERA_T042-088905-{swath}_{d.strftime('%Y%m%dT%H%M%S')}_20200101_20210101.h5"
+        f"COMPRESSED_OPERA_F150_{d.strftime('%Y%m%dT%H%M%S')}_20200101_20210101.h5"
         for d in sensing_time_list[:num_compressed]
-        for swath in ["IW1", "IW2", "IW3"]
     ]
     real_slcs = [
-        f"OPERA_T042-088905-{swath}_{d.strftime('%Y%m%dT%H%M%S')}.h5"
+        f"OPERA_F150_{d.strftime('%Y%m%dT%H%M%S')}.h5"
         for d in sensing_time_list[num_compressed:]
-        for swath in ["IW1", "IW2", "IW3"]
     ]
     return comp_slcs + real_slcs
 

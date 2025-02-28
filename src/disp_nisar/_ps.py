@@ -26,13 +26,13 @@ class WeightScheme(str, Enum):
 
 def precompute_ps(cfg: DisplacementWorkflow) -> tuple[list[Path], list[Path]]:
     # TODO: Check if this is working after removing burst
-    
+
     # ######################################
     # 1. Wrapped phase estimation
     # ######################################
     # grab the only key ("") and use that
     cfg.create_dir_tree()
-   
+
     combined_dispersion_files: list[Path] = []
     combined_mean_files: list[Path] = []
     Executor = DummyProcessPoolExecutor

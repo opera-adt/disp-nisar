@@ -189,8 +189,8 @@ def create_explorer_widget(
 
     Examples
     --------
-    >>> hf = h5py.File("file.h5", "r")
-    >>> create_explorer_widget(hf)
+    >>> hf = h5py.File("file.h5", "r")  # doctest: +SKIP
+    >>> create_explorer_widget(hf)      # doctest: +SKIP
 
     """
 

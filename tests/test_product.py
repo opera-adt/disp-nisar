@@ -9,10 +9,10 @@ from disp_nisar.pge_runconfig import RunConfig
 TEST_DATA_DIR = Path(__file__).parent / "data"
 TEST_CSLC_FILE = (
     TEST_DATA_DIR
-    / "OPERA_L2_CSLC_NI_F150_20060630T0619Z_20240504T181714Z_NI_HH_v0.1.h5"  # noqa: E501
+    / "OPERA_L2_CSLC_NI_F150_20060630T061920Z_20240504T181714Z_NI_HH_v0.1.h5"  # noqa: E501
 )
 
-TEST_OUTPUT_CCSLC_FILE = TEST_DATA_DIR / "compressed_20221228_20230101_20230113.tif"
+TEST_OUTPUT_CCSLC_FILE = TEST_DATA_DIR / "compressed_20060630_20230101_20230113.tif"
 
 
 # Shapely runtime warning
@@ -63,7 +63,7 @@ def test_create_output_product(
 def test_create_compressed_slc(tmp_path):
     # OPERA_L2_CSLC_NI_F150_20221228T161651Z_20240504T181714Z_NI_HH_v0.1.h5
     # compressed_20221228_20230101_20230113.tif
-    date_str = "20221228_20230101_20230113"
+    date_str = "20060630_20230101_20230113"
     processed_ccslc_file = TEST_OUTPUT_CCSLC_FILE
     comp_slc_dict = {"": [processed_ccslc_file]}
 
@@ -71,14 +71,15 @@ def test_create_compressed_slc(tmp_path):
         comp_slc_dict, cslc_file_list=[TEST_CSLC_FILE], output_dir=tmp_path
     )
 
-    expected_name = tmp_path / product.COMPRESSED_SLC_TEMPLATE.format(
-        date_str=date_str
-    )
+    expected_name = tmp_path / product.COMPRESSED_SLC_TEMPLATE.format(date_str=date_str)
     assert expected_name.exists()
     # Check product structure
     with h5py.File(expected_name) as hf:
         assert hf["/science/LSAR/GSLC/grids/frequencyA/HH"].size > 0
         assert "/science/LSAR/GSLC/metadata/orbit" in hf
         assert "/science/LSAR/identification/zeroDopplerStartTime" in hf
-        assert "/science/LSAR/GSLC/metadata/sourceData/swaths/frequencyA/centerFrequency" in hf
-        # assert "/metadata/processing_information/input_burst_metadata/wavelength" in hf
+        assert (
+            "/science/LSAR/GSLC/metadata/sourceData/swaths/frequencyA/centerFrequency"
+            in hf
+        )
+    # assert "/metadata/processing_information/input_burst_metadata/wavelength" in hf

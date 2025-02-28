@@ -32,6 +32,7 @@ def resample_to_target(
         out = np.ma.MaskedArray(data=out, mask=mask_out)
     return out
 
+
 # TODO: Does this function have to be changed to read from the GUNW products?
 def calculate_solid_earth_tides_correction(
     like_filename: Filename,

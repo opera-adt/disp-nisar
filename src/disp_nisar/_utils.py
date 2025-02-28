@@ -9,12 +9,14 @@ from pathlib import Path
 import numpy as np
 import shapely.ops
 from dolphin import PathOrStr, io
+from dolphin._types import Bbox
 from dolphin.constants import NISAR_L_WAVELENGTH, NISAR_S_WAVELENGTH
 from dolphin.interferogram import estimate_correlation_from_phase
 from dolphin.unwrap import grow_conncomp_snaphu
 from dolphin.utils import full_suffix
 from dolphin.workflows.config import UnwrapOptions
 from osgeo import gdal
+from shapely import wkt
 from shapely.geometry import LinearRing, MultiPolygon, Polygon
 from tqdm.contrib.concurrent import thread_map
 
@@ -24,6 +26,7 @@ gdal.UseExceptions()
 
 METERS_TO_RADIANS_Lband = (-4 * np.pi) / NISAR_L_WAVELENGTH
 METERS_TO_RADIANS_Sband = (-4 * np.pi) / NISAR_S_WAVELENGTH
+
 
 def _update_snaphu_conncomps(
     timeseries_paths: Sequence[Path],
@@ -68,6 +71,7 @@ def _update_snaphu_conncomps(
     with mp_context.Pool(max_workers) as pool:
         return list(pool.map(_regrow, args_list))
 
+
 def _regrow(args: tuple[int, Path, Path, int, PathOrStr, UnwrapOptions]) -> Path:
     scratch_idx, unw_f, cor_f, nlooks, mask_filename, unwrap_options = args
     new_path = grow_conncomp_snaphu(
@@ -79,6 +83,7 @@ def _regrow(args: tuple[int, Path, Path, int, PathOrStr, UnwrapOptions]) -> Path
         scratchdir=unwrap_options._directory / f"scratch{scratch_idx}",
     )
     return new_path
+
 
 def _update_spurt_conncomps(
     timeseries_paths: Sequence[Path],
@@ -114,6 +119,7 @@ def _update_spurt_conncomps(
             pass
         new_conncomp_paths.append(new_name)
     return new_conncomp_paths
+
 
 def _create_correlation_images(
     ts_filenames: Sequence[PathOrStr],
@@ -265,45 +271,74 @@ def split_on_antimeridian(polygon: Polygon) -> MultiPolygon:
 
     return MultiPolygon(polys)
 
-def create_scaled_vrt(
-    file_paths: Sequence[Path],
-    scale_factor: float = METERS_TO_RADIANS,
-    suffix: str = ".scaled.vrt",
-) -> list[Path]:
-    """Create VRT files that scale the pixel values in `file_paths` by a constant.
+
+def _convert_meters_to_radians(timeseries_paths: Sequence[Path]) -> list[Path]:
+    """Copy over .tif, rescaling units from meters to radians."""
+    output_files: list[Path] = []
+    # TODO: Lband or Sband
+    for in_path in timeseries_paths:
+        out_path = in_path.with_suffix(".radians.tif")
+        io.write_arr(
+            arr=METERS_TO_RADIANS_Lband * io.load_gdal(in_path),
+            like_filename=in_path,
+            output_name=out_path,
+        )
+        output_files.append(out_path)
+    return output_files
+
+
+def get_nisar_frame_bbox(cslc_file: Path) -> tuple[int, Bbox]:
+    """Extract the EPSG code and bounding box from a NISAR CSLC file.
+
     Parameters
     ----------
-    file_paths : Sequence[Path]
-        List of paths to the input floating point rasters.
-    scale_factor : float
-        Value to multiply pixels by.
-        Default is 4 pi / lambda, the conversion factor to go from radians to meters.
-    suffix : str
-        suffix to use for output VRTs, attached to each input name in `file_paths`.
+    cslc_file : Path
+        path to the NISAR CSLC file (.h5 or .hdf5)
+
     Returns
     -------
-    list[Path]
-        List of paths to the generated VRT files.
+    tuple[int, Bbox]
+        (EPSG code, Bounding box)
+
+    Raises
+    ------
+    ValueError: If required metadata is missing
+
     """
-    vrt_paths: list[Path] = []
+    import h5py
 
-    for in_path in file_paths:
-        # Create VRT path with same name but .scaled.vrt extension
-        vrt_path = in_path.with_suffix(suffix)
-        vrt_paths.append(vrt_path)
+    with h5py.File(cslc_file, "r") as src:
+        if cslc_file.suffix in {".h5", ".hdf5"}:
+            try:
+                # Extract EPSG code
+                epsg = src["/science/LSAR/GSLC/metadata/radarGrid/projection"][()]
 
-        if vrt_path.exists():
-            logger.info(f"Skipping existing radian VRT for {in_path}")
-            continue
+                # Extract and process bounding polygon
+                bounding_polygon = src["/science/LSAR/identification/boundingPolygon"][
+                    ()
+                ]
 
-        # Create a VRT that applies the scale factor
-        logger.debug(f"Creating radian VRT for {in_path} at {vrt_path}")
-        translate_options = gdal.TranslateOptions(
-            # The "scaling" is sometimes used to rescale to a new (min, max)
-            # Here, we can use 0-1/0-scale_factor to multiple all pixels by scale_factor
-            format="VRT",
-            scaleParams=[[0, 1, 0, scale_factor]],
-        )
-        gdal.Translate(vrt_path, in_path, options=translate_options)
+                if isinstance(bounding_polygon, bytes):
+                    bounding_polygon = bounding_polygon.decode("utf-8")
 
-    return vrt_paths
+                # Convert WKT to Polygon and get bounds
+                polygon_2d = Polygon(
+                    [(x, y) for x, y, *_ in wkt.loads(bounding_polygon).exterior.coords]
+                )
+                bounds = polygon_2d.bounds
+
+            except KeyError as e:
+                raise ValueError(f"Required metadata missing in NISAR file: {e}")
+        else:
+            # Alternative format handling
+            epsg = src["data"]["spatial_ref"][()]
+            data = src["data"]
+
+            bounds = (
+                data["x"][()].min(),
+                data["y"][()].min(),
+                data["x"][()].max(),
+                data["y"][()].max(),
+            )
+
+    return epsg, Bbox(*bounds)

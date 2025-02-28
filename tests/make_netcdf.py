@@ -49,7 +49,6 @@ def create_test_nc(
         shape = data.shape
     assert shape == data.shape, "Shape mismatch"
     assert data.dtype == dtype, "Data type mismatch"
-
     rows, cols = shape
     # Create basic HDF5 file
     hf = h5py.File(outfile, write_mode)

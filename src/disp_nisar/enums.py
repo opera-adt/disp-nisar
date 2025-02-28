@@ -14,15 +14,18 @@ class ProcessingMode(str, Enum):
     HISTORICAL = "historical"
     """Past stack of data: output multiple results."""
 
+
 class ImagingFrequency(str, Enum):
-    """The frequency of the imaging radar"""
+    """The frequency of the imaging radar."""
 
     A = "frequencyA"
     B = "frequencyB"
 
+
 class Polarization(str, Enum):
-    """Polarization of the images"""
+    """Polarization of the images."""
+
     HH = "HH"
     VV = "VV"
-    HV = 'HV'
-    VH = 'VH'
+    HV = "HV"
+    VH = "VH"

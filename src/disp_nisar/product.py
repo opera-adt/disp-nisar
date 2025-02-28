@@ -6,7 +6,6 @@ import datetime
 import logging
 import subprocess
 from collections.abc import Iterable, Mapping
-from concurrent.futures import ProcessPoolExecutor
 from io import StringIO
 from multiprocessing import get_context
 from pathlib import Path
@@ -24,7 +23,7 @@ from dolphin.utils import DummyProcessPoolExecutor, format_dates
 from dolphin.workflows import DisplacementWorkflow, YamlModel
 from numpy.typing import ArrayLike, DTypeLike
 from opera_utils import (
-    OPERA_DATASET_NAME,
+    # OPERA_DATASET_NAME,
     filter_by_date,
     get_dates,
     get_radar_wavelength,
@@ -34,7 +33,7 @@ from opera_utils import (
 
 from . import __version__ as disp_nisar_version
 from ._baselines import _interpolate_data, compute_baselines
-from ._common import DATETIME_FORMAT
+from ._common import DATETIME_FORMAT, NISAR_DATASET_NAME
 from ._reference import ReferencePoint
 from ._utils import extract_footprint
 from .browse_image import make_browse_image_from_arr
@@ -178,7 +177,7 @@ def create_output_product(
             start, *_, end = sorted(files, key=lambda f: Path(f).name)
         logger.debug(f"Start, end files: {start}, {end}")
         return start, end
-    
+
     # TODO: the following functions from opera_utils need to be checked for NISAR
     reference_start_file, reference_end_file = _get_start_end_cslcs(
         reference_cslc_files
@@ -308,7 +307,7 @@ def create_output_product(
     filtered_disp_arr[bad_pixel_mask] = np.nan
 
     product_infos: list[ProductInfo] = list(DISPLACEMENT_PRODUCTS)
-    
+
     with h5netcdf.File(output_name, "w", **FILE_OPTS) as f:
         f.attrs.update(GLOBAL_ATTRS)
         _create_grid_mapping(group=f, crs=crs, gt=gt)
@@ -568,6 +567,7 @@ def _create_corrections_group(
             attrs=ref_attrs,
         )
 
+
 # TODO: Need to change CEOS Metadata for NISAR
 def _create_identification_group(
     output_name: Filename,
@@ -652,8 +652,7 @@ def _create_identification_group(
             data=reference_start_time.strftime(DATETIME_FORMAT),
             fillvalue=None,
             description=(
-                "Zero doppler start time of the frame for"
-                " the reference acquisition."
+                "Zero doppler start time of the frame for the reference acquisition."
             ),
         )
         _create_dataset(
@@ -663,8 +662,7 @@ def _create_identification_group(
             data=reference_end_time.strftime(DATETIME_FORMAT),
             fillvalue=None,
             description=(
-                "Zero doppler start time of the frame for"
-                " the reference acquisition."
+                "Zero doppler start time of the frame for the reference acquisition."
             ),
         )
         _create_dataset(
@@ -674,8 +672,7 @@ def _create_identification_group(
             data=secondary_start_time.strftime(DATETIME_FORMAT),
             fillvalue=None,
             description=(
-                "Zero doppler start time of the frame for"
-                " the secondary acquisition."
+                "Zero doppler start time of the frame for the secondary acquisition."
             ),
         )
         _create_dataset(
@@ -685,8 +682,7 @@ def _create_identification_group(
             data=secondary_end_time.strftime(DATETIME_FORMAT),
             fillvalue=None,
             description=(
-                "Zero doppler start time of the frame for"
-                " the secondary acquisition."
+                "Zero doppler start time of the frame for the secondary acquisition."
             ),
         )
 
@@ -903,7 +899,7 @@ def _create_identification_group(
             group=identification_group,
             name="source_data_polarization",
             dimensions=(),
-            data="VV",
+            data="HH",
             fillvalue=None,
             description="Radar polarization of input products used",
             attrs={"units": "unitless"},
@@ -913,7 +909,10 @@ def _create_identification_group(
             group=identification_group,
             name="source_data_original_institution",
             dimensions=(),
-            data="NASA's Jet Propulsion Laboratory (JPL) and ISRO (Indian Space Research Organisation)",
+            data=(
+                "NASA's Jet Propulsion Laboratory (JPL) and ISRO (Indian Space Research"
+                " Organisation)"
+            ),
             fillvalue=None,
             description="Original processing institution of NISAR SLC data",
         )
@@ -1114,7 +1113,9 @@ def _create_metadata_group(
             dimensions=(),
             data=disp_nisar_version,
             fillvalue=None,
-            description="Version of the disp-nisar software used to generate the product.",
+            description=(
+                "Version of the disp-nisar software used to generate the product."
+            ),
         )
         _create_dataset(
             group=metadata_group,
@@ -1638,6 +1639,7 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
     # burst_id, comp_slc_file, output_dir, opera_cslc_file = info
     comp_slc_file, output_dir, opera_cslc_file = info
     date_str = format_dates(*get_dates(comp_slc_file.stem))
+
     name = COMPRESSED_SLC_TEMPLATE.format(date_str=date_str)
     outname = Path(output_dir) / name
 
@@ -1655,7 +1657,7 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
     attrs = {"units": "unitless"}
     attrs.update(metadata_dict)
 
-    *parts, dset_name = OPERA_DATASET_NAME.split("/")
+    *parts, dset_name = NISAR_DATASET_NAME.split("/")
     dispersion_dset_name = "amplitude_dispersion"
     group_name = "/".join(parts)
     logger.info(f"Writing {outname}")
@@ -1754,7 +1756,7 @@ def _copy_hdf5_dsets(
                 # Otherwise, form the name, store in same group as src
                 new_name = f"{prepend_str}{Path(dset_path).name}"
                 if delete_if_exists and new_name in dst[out_group]:
-                    del dst[new_path]
+                    del dst[out_group][new_name]
                 src.copy(src[dset_path], dst[out_group], name=new_name)
 
 
@@ -1775,17 +1777,23 @@ def copy_cslc_metadata_to_compressed(
     # and polarization. Hardcoding for now
     dsets_to_copy = [
         ("/science/LSAR/GSLC/metadata/orbit", None),
-        #("/metadata/processing_information/input_burst_metadata/wavelength", None),
-        ("/science/LSAR/GSLC/metadata/sourceData/swaths/frequencyA/centerFrequency", None),
-        #("/metadata/processing_information/input_burst_metadata/platform_id", None),
-        #("/metadata/processing_information/input_burst_metadata/iw2_mid_range", None),
-        ("/science/LSAR/GSLC/metadata/sourceData/processingInformation/parameters/frequencyA/slantRange", None),
-        ("/science/LSAR/identification/productSpecificationVersion", None)
-        ("/science/LSAR/identification/productVersion", None)
-        #("/metadata/processing_information/input_burst_metadata/ipf_version", None),
-        #("/metadata/processing_information/algorithms/COMPASS_version", None),
-        #("/metadata/processing_information/algorithms/ISCE3_version", None),
-        #("/metadata/processing_information/algorithms/s1_reader_version", None),
+        # ("/metadata/processing_information/input_burst_metadata/wavelength", None),
+        (
+            "/science/LSAR/GSLC/metadata/sourceData/swaths/frequencyA/centerFrequency",
+            None,
+        ),
+        # ("/metadata/processing_information/input_burst_metadata/platform_id", None),
+        # ("/metadata/processing_information/input_burst_metadata/iw2_mid_range", None),
+        (
+            "/science/LSAR/GSLC/metadata/sourceData/processingInformation/parameters/frequencyA/slantRange",
+            None,
+        ),
+        ("/science/LSAR/identification/productSpecificationVersion", None),
+        ("/science/LSAR/identification/productVersion", None),
+        # ("/metadata/processing_information/input_burst_metadata/ipf_version", None),
+        # ("/metadata/processing_information/algorithms/COMPASS_version", None),
+        # ("/metadata/processing_information/algorithms/ISCE3_version", None),
+        # ("/metadata/processing_information/algorithms/s1_reader_version", None),
         ("/science/LSAR/identification/zeroDopplerEndTime", None),
         ("/science/LSAR/identification/zeroDopplerStartTime", None),
         ("/science/LSAR/identification/boundingPolygon", None),
@@ -1894,21 +1902,20 @@ def create_compressed_products(
             ref_date = get_dates(comp_slc_file)[0]
             valid_date_files = filter_by_date(cslc_file_list, [ref_date])
             # matching_files = filter_by_burst_id(valid_date_files, burst_id)
-            msg = (
-                f"Found {len(valid_date_files)} matching CSLC files for"
-                f"{ref_date}"
-            )
+            msg = f"Found {len(valid_date_files)} matching CSLC files for{ref_date}"
             logger.info(msg)
             logger.info(valid_date_files)
 
             cur_opera_cslc = valid_date_files[-1]
-            c = CompressedSLCInfo("", comp_slc_file, output_dir, cur_opera_cslc)
+            c = CompressedSLCInfo(comp_slc_file, output_dir, cur_opera_cslc)
             compressed_slc_infos.append(c)
 
-    executor_class = (
-        ProcessPoolExecutor if max_workers > 1 else DummyProcessPoolExecutor
-    )
+    # executor_class = (
+    #     ProcessPoolExecutor if max_workers > 1 else DummyProcessPoolExecutor
+    # )
+    executor_class = DummyProcessPoolExecutor
     ctx = get_context("spawn")
+
     with executor_class(
         max_workers=max_workers,
         mp_context=ctx,

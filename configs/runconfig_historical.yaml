@@ -35,7 +35,7 @@ dynamic_ancillary_file_group:
 static_ancillary_file_group:
   # JSON file containing list of reference date changes for each frame.
   #   Type: string | null.
-  reference_date_database_json: 
+  reference_date_database_json:
 primary_executable:
   # Product type of the PGE.
   #   Type: string.

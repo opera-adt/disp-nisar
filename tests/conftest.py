@@ -47,12 +47,12 @@ def slc_file_list_nc_with_sds(tmp_path, slc_stack):
     for i in range(len(slc_stack)):
         fname = str(name_template).format(date=str(start_date + i))
         create_test_nc(
-            fname, epsg=32615, subdir=subdirs, data_ds_name=ds_name, data=slc_stack[i]
+            fname, epsg=32611, subdir=subdirs, data_ds_name=ds_name, data=slc_stack[i]
         )
         # just point to one of them
         file_list.append(fname)
 
-    subdataset = "/data/VV"
+    subdataset = "/data/HH"
     return file_list, subdataset
 
 

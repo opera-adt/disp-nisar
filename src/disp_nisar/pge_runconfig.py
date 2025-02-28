@@ -23,15 +23,16 @@ from dolphin.workflows.config import (
 )
 from dolphin.workflows.config._common import _read_file_list_or_glob
 from opera_utils import (
-    OPERA_DATASET_NAME,
+    # OPERA_DATASET_NAME,
     PathOrStr,
     get_dates,
-    get_frame_bbox,
     sort_files_by_date,
 )
 from pydantic import ConfigDict, Field, field_validator
 
-from .enums import ProcessingMode, Polarization, ImagingFrequency
+from ._common import NISAR_DATASET_NAME
+from ._utils import get_nisar_frame_bbox
+from .enums import ImagingFrequency, Polarization, ProcessingMode
 
 
 class InputFileGroup(YamlModel):
@@ -46,15 +47,18 @@ class InputFileGroup(YamlModel):
         description="Frame ID of the cslcs contained in `cslc_file_list`.",
     )
     frequency: str = Field(
-        default=ImagingFrequency.A,
+        default=ImagingFrequency.A.value,
         description="Frequency in which cslcs are acquired.",
     )
     polarization: str = Field(
-        default=Polarization.HH,
+        default=Polarization.HH.value,
         description="Polarization of the cslcs contained in `cslc_file_list`.",
     )
     model_config = ConfigDict(
-        extra="forbid", json_schema_extra={"required": ["cslc_file_list", "frame_id", "frequency", 'polarization']}
+        extra="forbid",
+        json_schema_extra={
+            "required": ["cslc_file_list", "frame_id", "frequency", "polarization"]
+        },
     )
 
     _check_cslc_file_glob = field_validator("cslc_file_list", mode="before")(
@@ -112,6 +116,10 @@ class DynamicAncillaryFileGroup(YamlModel):
     )
     model_config = ConfigDict(extra="forbid")
 
+    # _check_gunw_file_glob = field_validator("gunw_files", mode="before")(
+    #     _read_file_list_or_glob
+    # )
+
 
 class StaticAncillaryFileGroup(YamlModel):
     """Group for files which remain static over time."""
@@ -122,6 +130,7 @@ class StaticAncillaryFileGroup(YamlModel):
             "JSON file containing list of reference date changes for each frame"
         ),
     )
+
 
 class PrimaryExecutable(YamlModel):
     """Group describing the primary executable."""
@@ -188,7 +197,7 @@ class AlgorithmParameters(YamlModel):
     output_options: OutputOptions = Field(default_factory=OutputOptions)
 
     subdataset: str = Field(
-        default=OPERA_DATASET_NAME,
+        default=NISAR_DATASET_NAME,
         description="Name of the subdataset to use in the input NetCDF files.",
     )
 
@@ -292,9 +301,12 @@ class RunConfig(YamlModel):
         dem_file = self.dynamic_ancillary_file_group.dem_file
         frame_id = self.input_file_group.frame_id
         frequency = self.input_file_group.frequency
+        if not isinstance(frequency, str):
+            frequency = frequency.value
         polarization = self.input_file_group.polarization
-
-        nisar_dataset_name = f'/science/LSAR/GSLC/grids/{frequency}/{polarization}'
+        if not isinstance(polarization, str):
+            polarization = polarization.value
+        nisar_dataset_name = f"/science/LSAR/GSLC/grids/{frequency}/{polarization}"
 
         # Load the algorithm parameters from the file
         algorithm_parameters = AlgorithmParameters.from_yaml(
@@ -306,11 +318,14 @@ class RunConfig(YamlModel):
         param_dict = algo_params.model_dump()
 
         # Convert the frame_id into an output bounding box
-        frame_to_burst_file = self.static_ancillary_file_group.frame_to_burst_json
-        bounds_epsg, bounds = get_frame_bbox(
-            frame_id=frame_id, json_file=frame_to_burst_file
+        # TODO: need to modify this function for NISAR
+        # bounds_epsg, bounds = get_frame_bbox(
+        #     frame_id=frame_id, json_file=frame_to_burst_file
+        # )
+        bounds_epsg, bounds = get_nisar_frame_bbox(
+            self.input_file_group.cslc_file_list[0]
         )
-        
+
         # TODO: if the frame id is given in connfig, check for consistency of data
         # and the given frame id by reading frame id from the CSLCs
 
@@ -324,7 +339,9 @@ class RunConfig(YamlModel):
         #     raise ValueError("The CSLC data and frame id do not match")
 
         # Setup the OPERA-specific options to adjust from dolphin's defaults
-        input_options = {"subdataset": nisar_dataset_name} # param_dict.pop("subdataset")}
+        input_options = {
+            "subdataset": nisar_dataset_name
+        }  # param_dict.pop("subdataset")}
         param_dict["output_options"]["bounds"] = bounds
         param_dict["output_options"]["bounds_epsg"] = bounds_epsg
         # Always turn off overviews (won't be saved in the HDF5 anyway)
@@ -346,8 +363,8 @@ class RunConfig(YamlModel):
         )
         param_dict["phase_linking"]["output_reference_idx"] = output_reference_idx
         param_dict["output_options"]["extra_reference_date"] = extra_reference_date
-        
-        # TODO: the iono corrections to be read from gunws, tropo corrections 
+
+        # TODO: the iono corrections to be read from gunws, tropo corrections
         # to be created separately
         # unpacked to load the rest of the parameters for the DisplacementWorkflow
         return DisplacementWorkflow(
@@ -416,7 +433,7 @@ class RunConfig(YamlModel):
                 # ionosphere_files=workflow.correction_options.ionosphere_files,
                 # troposphere_files=workflow.correction_options.troposphere_files,
                 dem_file=workflow.correction_options.dem_file,
-                static_layers_files=workflow.correction_options.geometry_files,
+                gunw_files=workflow.correction_options.geometry_files,
             ),
             static_ancillary_file_group=StaticAncillaryFileGroup(
                 # frame_to_burst_json=frame_to_burst_json,

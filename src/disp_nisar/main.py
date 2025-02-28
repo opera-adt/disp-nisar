@@ -17,13 +17,14 @@ from dolphin.workflows.config import DisplacementWorkflow
 from dolphin.workflows.displacement import OutputPaths
 from dolphin.workflows.displacement import run as run_displacement
 from opera_utils import get_dates, group_by_date
-from opera_utils.geometry import get_incidence_angles
 
 from disp_nisar import __version__, product
-from disp_nisar._masking import create_mask_from_distance #, create_layover_shadow_masks
+from disp_nisar._masking import (
+    create_mask_from_distance,  # , create_layover_shadow_masks
+)
 from disp_nisar._ps import precompute_ps
-from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 from disp_nisar.ionosphere import read_ionosphere_phase_screen
+from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
 from ._reference import ReferencePoint, read_reference_point
 from ._utils import (
@@ -31,7 +32,6 @@ from ._utils import (
     _create_correlation_images,
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
-    create_scaled_vrt,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ def run(
         cfg.mask_file = water_binary_mask
     else:
         water_binary_mask = None
-    
+
     # TODO: There is no layover/shadow mask in static layers, what to do instead?
     # if len(cfg.correction_options.geometry_files) > 0:
     #     layover_binary_mask_files = create_layover_shadow_masks(
@@ -97,15 +97,17 @@ def run(
         # This is the first ministack: The amplitude estimation will be weak.
         # Drop the PS threshold to a conservative number to avoid false positives
         cfg.ps_options.amp_dispersion_threshold = 0.15
-    
-    # TODO: modify run_displacement to not run stitching for nisar and do 
+
+    # TODO: modify run_displacement to not run stitching for nisar and do
     # corrections differently
     # Run dolphin's displacement workflow
     out_paths = run_displacement(cfg=cfg, debug=debug)
     # Read the ionosphere phase screen for timeseries from GUNW files
     out_paths.ionospheric_corrections = read_ionosphere_phase_screen(
-        pge_runconfig.dynamic_ancillary_file_group.gunw_files, out_paths.timeseries_paths)
-    
+        pge_runconfig.dynamic_ancillary_file_group.gunw_files,
+        out_paths.timeseries_paths,
+    )
+
     create_products(
         out_paths=out_paths,
         cfg=cfg,
@@ -119,6 +121,7 @@ def run(
     logger.info(f"Maximum memory usage: {max_mem:.2f} GB")
     logger.info(f"Config file dolphin version: {cfg._dolphin_version}")
     logger.info(f"Current running disp_nisar version: {__version__}")
+
 
 def create_products(
     out_paths: OutputPaths,
@@ -203,7 +206,7 @@ def create_products(
         _create_nodata_mask(
             filename=out_paths.timeseries_paths[0], output_filename=combined_mask_file
         )
-    
+
     ## TODO: remove stitched from naming in run_displacement
     # Check and update correlation paths
     if set(group_by_date(out_paths.stitched_cor_paths).keys()) != disp_date_keys:
@@ -246,7 +249,8 @@ def create_products(
             )
 
     # Get the incidence angles for /identification metadata
-    # TODO: There is no geometry files, all are included in the data as radar grid datacube
+    # TODO: There is no geometry files, all are included in the data as
+    # radar grid datacube
     if len(cfg.correction_options.geometry_files) > 0:
         near_far_incidence_angles = _get_near_far_incidence_angles(
             cfg.correction_options.geometry_files
@@ -325,39 +329,26 @@ def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:
     sensing_date_list = [get_dates(f)[0] for f in non_compressed_slcs]
     # Use a set to check for duplicate dates
     if len(sensing_date_list) > len(set(sensing_date_list)):
-        msg = f"Duplicate dates passed:\n"
+        msg = "Duplicate dates passed:\n"
         file_string = "\n".join(sensing_date_list)
         msg += file_string
         raise ValueError(msg)
 
 
 def _get_near_far_incidence_angles(geometry_files: list[Path]) -> tuple[float, float]:
+    import h5py
     import numpy as np
 
     ##TODO: min and max of incidence angle in the data in radar grid
-    
-    burst_to_static_layers = group_by_burst(sorted(geometry_files))
-    burst_ids = list(burst_to_static_layers.keys())
 
-    # Sort the bursts by IW first, then burst ID number
-    def get_iw_key(burst):
-        return burst.split("_")[::-1]
+    with h5py.File(geometry_files[0]) as ds:
+        incidence_angles = ds["/science/LSAR/GUNW/metadata/radarGrid/incidenceAngle"][
+            ()
+        ]
 
-    sorted_bursts = sorted(burst_ids, key=get_iw_key)
+    near_incidence = np.nanmin(incidence_angles).round(1)
+    far_incidence = np.nanmax(incidence_angles).round(1)
 
-    near_burst = sorted_bursts[0]  # IW1 (if exists, or lowest IW)
-    far_burst = sorted_bursts[-1]  # IW3, or furthest range IW
-
-    # There's only 1 static layers file per burst id
-    near_static_layers_file = burst_to_static_layers[near_burst][0]
-    far_static_layers_file = burst_to_static_layers[far_burst][0]
-    # Get any normal cslc file
-    near_incidence = np.nanmin(
-        get_incidence_angles(near_static_layers_file, subsample_factor=30)
-    ).round(1)
-    far_incidence = np.nanmax(
-        get_incidence_angles(far_static_layers_file, subsample_factor=30)
-    ).round(1)
     return near_incidence, far_incidence
 
 
@@ -374,7 +365,7 @@ class ProductFiles(NamedTuple):
     similarity: Path
     residual: Path
     water_mask: Path | None
-    # TODO: what should we add for nisar: 
+    # TODO: what should we add for nisar:
     # solid earth tides?: included in GUNW, for each ifg. needs inversion ?
 
 

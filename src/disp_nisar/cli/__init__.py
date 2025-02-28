@@ -20,8 +20,7 @@ def cli_app(ctx: click.Context, debug: bool) -> None:
 cli_app.add_command(run_cli)
 cli_app.add_command(validate)
 cli_app.add_command(make_browse)
-# TODO: What do we need to download for disp-nisar?
-# cli_app.add_command(download_group)
+cli_app.add_command(download_group)
 
 if __name__ == "__main__":
     cli_app()

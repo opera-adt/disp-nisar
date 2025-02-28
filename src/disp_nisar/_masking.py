@@ -5,6 +5,7 @@ from typing import Sequence
 import numpy as np
 from dolphin._types import Filename, PathOrStr
 from dolphin.io import format_nc_filename, load_gdal, write_arr
+
 # from opera_utils import group_by_burst
 from scipy import ndimage
 
@@ -150,10 +151,9 @@ def create_layover_shadow_masks(
         logger.warning(f"Found multiple static files: {cslc_static_files}")
     f = cslc_static_files[0]
     input_name = format_nc_filename(f, ds_name="/data/layover_shadow_mask")
-    out_file = output_path / f"layover_shadow.tif"
+    out_file = output_path / "layover_shadow.tif"
     if out_file.exists():
         output_files.append(out_file)
-        continue
 
     logger.info(f"Extracting layover shadow mask from {f} to {out_file}")
     layover_data = load_gdal(input_name)
