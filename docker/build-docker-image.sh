@@ -11,7 +11,7 @@ readonly HELP="$USAGE
 Build the docker image for disp-nisar.
 
 options:
--t, --tag TAG           Specify a name/tag for the docker image. Default: opera/disp-nisar:latest
+-t, --tag TAG           Specify a name/tag for the docker image. Default: opera-adt/disp-nisar:latest
 -u, --user-id USER_ID   Specify the user id to use in the docker image. Default: 1000
 -b, --base BASE         Specify the base image to use. Default: ubuntu:22.04
 -h, --help              Show this help message and exit
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-image_name=${TAG:-"opera/disp-nisar:latest"}
+image_name=${TAG:-"opera-adt/disp-nisar:latest"}
 
 # Build the Docker image
 cmd_base="docker build --network=host --tag $image_name --file docker/Dockerfile"
