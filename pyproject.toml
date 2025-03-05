@@ -27,7 +27,7 @@ Homepage = "https://github.com/opera-adt/disp-nisar"
 
 # Entry points for the command line interface
 [project.scripts]
-disp_nisar = "disp_nisar.cli:cli_app"
+disp-nisar = "disp_nisar.cli:cli_app"
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
