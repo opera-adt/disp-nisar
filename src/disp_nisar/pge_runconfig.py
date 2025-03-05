@@ -24,6 +24,7 @@ from dolphin.workflows.config import (
 from dolphin.workflows.config._common import _read_file_list_or_glob
 from opera_utils import (
     # OPERA_DATASET_NAME,
+    get_frame_bbox,
     PathOrStr,
     get_dates,
     sort_files_by_date,
@@ -123,7 +124,12 @@ class DynamicAncillaryFileGroup(YamlModel):
 
 class StaticAncillaryFileGroup(YamlModel):
     """Group for files which remain static over time."""
-
+    frame_to_bounds_json: Union[Path, None] = Field(
+        None,
+        description=(
+            "JSON file containing the mapping from frame_id to bounds information"
+        ),
+    )
     reference_date_database_json: Union[Path, None] = Field(
         None,
         description=(
@@ -319,6 +325,9 @@ class RunConfig(YamlModel):
 
         # Convert the frame_id into an output bounding box
         # TODO: need to modify this function for NISAR
+        # Following commented should work, but the test data is
+        # currently ALOS. not sure if it does. we need to uncomment it for NISAR.
+        # frame_to_bounds_file = self.static_ancillary_file_group.frame_to_bounds_json
         # bounds_epsg, bounds = get_frame_bbox(
         #     frame_id=frame_id, json_file=frame_to_burst_file
         # )
@@ -326,7 +335,7 @@ class RunConfig(YamlModel):
             self.input_file_group.cslc_file_list[0]
         )
 
-        # TODO: if the frame id is given in connfig, check for consistency of data
+        # TODO: if the frame id is given in config, check for consistency of data
         # and the given frame id by reading frame id from the CSLCs
 
         # Check for consistency of frame and burst ids
@@ -394,6 +403,7 @@ class RunConfig(YamlModel):
         polarization: str,
         processing_mode: ProcessingMode,
         algorithm_parameters_file: Path,
+        frame_to_bounds_json: Optional[Path] = None,
         reference_date_json: Optional[Path] = None,
         save_compressed_slc: bool = False,
         output_directory: Optional[Path] = None,
@@ -436,7 +446,7 @@ class RunConfig(YamlModel):
                 gunw_files=workflow.correction_options.geometry_files,
             ),
             static_ancillary_file_group=StaticAncillaryFileGroup(
-                # frame_to_burst_json=frame_to_burst_json,
+                frame_to_bounds_json=frame_to_bounds_json,
                 reference_date_database_json=reference_date_json,
             ),
             primary_executable=PrimaryExecutable(

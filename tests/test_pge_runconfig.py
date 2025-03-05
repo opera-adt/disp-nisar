@@ -55,10 +55,14 @@ def dynamic_ancillary_file_group(algorithm_parameters_file, sample_gunw_list):
         gunw_files=sample_gunw_list,
     )
 
+@pytest.fixture
+def frame_to_bounds_json_file():
+    return Path(__file__).parent / "data/Frame_to_bounds_DISP-NI_v0.1.json"
 
 @pytest.fixture
-def static_ancillary_file_group(algorithm_parameters_file):
-    return StaticAncillaryFileGroup(algorithm_parameters_file=algorithm_parameters_file)
+def static_ancillary_file_group(frame_to_bounds_json_file, algorithm_parameters_file):
+    return StaticAncillaryFileGroup(frame_to_bounds_json=frame_to_bounds_json_file,
+                                    algorithm_parameters_file=algorithm_parameters_file)
 
 
 @pytest.fixture
@@ -129,7 +133,8 @@ def test_runconfig_to_workflow(runconfig_minimum):
     print(runconfig_minimum.to_workflow())
 
 
-def test_runconfig_from_workflow(tmp_path, reference_date_json_file, runconfig_minimum):
+def test_runconfig_from_workflow(tmp_path, frame_to_bounds_json_file,
+                                 reference_date_json_file, runconfig_minimum):
     w1 = runconfig_minimum.to_workflow()
     frame_id = runconfig_minimum.input_file_group.frame_id
     frequency = runconfig_minimum.input_file_group.frequency
@@ -141,6 +146,7 @@ def test_runconfig_from_workflow(tmp_path, reference_date_json_file, runconfig_m
         frame_id=frame_id,
         frequency=frequency,
         polarization=polarization,
+        frame_to_bounds_json=frame_to_bounds_json_file,
         reference_date_json=reference_date_json_file,
         processing_mode=proc_mode,
         algorithm_parameters_file=algo_file,
