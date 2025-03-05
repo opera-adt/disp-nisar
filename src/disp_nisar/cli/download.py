@@ -7,8 +7,8 @@ import click
 import opera_utils
 
 # from opera_utils import get_burst_ids_for_frame
-from disp_s1._dem import S3_DEM_BUCKET, S3_LONLAT_VRT_KEY
-from disp_s1._dem import stage_dem as stage_dem
+from disp_nisar._dem import S3_DEM_BUCKET, S3_LONLAT_VRT_KEY
+from disp_nisar._dem import stage_dem as stage_dem
 from dolphin import Bbox
 
 # from disp_s1.ionosphere import (
