@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping
 from io import StringIO
 from multiprocessing import get_context
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, Optional, Sequence, Union
+from typing import Any, Literal, NamedTuple, Optional, Sequence, Union, cast
 
 import h5netcdf
 import h5py
@@ -853,8 +853,9 @@ def _create_identification_group(
             data=reference_orbit_type,
             fillvalue=None,
             description=(
-                "Type of orbit (forcast, near real-time, medium precision, precise, custom)"
-                "used during input data processing for the reference acquisition"
+                "Type of orbit (forcast, near real-time, medium precision, precise,"
+                " custom)used during input data processing for the reference"
+                " acquisition"
             ),
         )
         _create_dataset(
@@ -864,8 +865,9 @@ def _create_identification_group(
             data=secondary_orbit_type,
             fillvalue=None,
             description=(
-                "Type of orbit (forcast, near real-time, medium precision, precise, custom)" 
-                "used during input data processing for the secondary acquisition"
+                "Type of orbit (forcast, near real-time, medium precision, precise,"
+                " custom)used during input data processing for the secondary"
+                " acquisition"
             ),
         )
 
@@ -1442,18 +1444,36 @@ def _get_orbit_direction(cslc_filename: Filename) -> Literal["ascending", "desce
 
 def _get_orbit_type(
     cslc_filename: Filename,
-) -> Literal["Forecast Orbit Ephemeris", "Near real-time Orbit Ephemeris",
-             "Medium precision Orbit Ephemeris", "precise orbit Ephemeris", "custom"]:
-    orbit_types = {"POE": "precise orbit Ephemeris",
-                   "FOE": "Forecast Orbit Ephemeris",
-                   "NOE": "Near real-time Orbit Ephemeris",
-                   "MOE": "Medium precision Orbit Ephemeris",
-                   "DOE": "custom"}
+) -> Literal[
+    "Forecast Orbit Ephemeris",
+    "Near real-time Orbit Ephemeris",
+    "Medium precision Orbit Ephemeris",
+    "precise orbit Ephemeris",
+    "custom",
+]:
+    orbit_types = {
+        "POE": "precise orbit Ephemeris",
+        "FOE": "Forecast Orbit Ephemeris",
+        "NOE": "Near real-time Orbit Ephemeris",
+        "MOE": "Medium precision Orbit Ephemeris",
+        "DOE": "custom",
+    }
     with h5py.File(cslc_filename) as hf:
         out = hf["/science/LSAR/GSLC/metadata/orbit/orbitType"][()]
         if isinstance(out, bytes):
             out = out.decode("utf-8")
-    return orbit_types[out]
+
+    # Use cast to explicitly tell the type checker the return value is a Literal
+    return cast(
+        Literal[
+            "Forecast Orbit Ephemeris",
+            "Near real-time Orbit Ephemeris",
+            "Medium precision Orbit Ephemeris",
+            "precise orbit Ephemeris",
+            "custom",
+        ],
+        orbit_types[out],
+    )
 
 
 def _create_dataset(

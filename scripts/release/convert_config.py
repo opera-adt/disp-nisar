@@ -50,8 +50,15 @@ def main():
         "dolphin_config_file", type=str, help="Path to dolphin configuration YAML file."
     )
     parser.add_argument("--frame-id", required=True, type=int, help="Frame ID.")
-    parser.add_argument("--frequency", required=True, type=str, help="Frequency (frequencyA, frequencyB).")
-    parser.add_argument("--polarization", required=True, type=str, help="Polarization (HH, VV, HV, VH).")
+    parser.add_argument(
+        "--frequency",
+        required=True,
+        type=str,
+        help="Frequency (frequencyA, frequencyB).",
+    )
+    parser.add_argument(
+        "--polarization", required=True, type=str, help="Polarization (HH, VV, HV, VH)."
+    )
     parser.add_argument(
         "--processing-mode",
         required=True,
@@ -75,7 +82,8 @@ def main():
         "--frame-to-bounds-json",
         type=Path,
         help=(
-            "Path to frame-to-bounds mapping JSON file, summarizing DISP frame database."
+            "Path to frame-to-bounds mapping JSON file, summarizing DISP frame"
+            " database."
         ),
     )
     parser.add_argument(

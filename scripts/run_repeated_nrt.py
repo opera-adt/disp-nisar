@@ -8,7 +8,7 @@ from itertools import chain
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from dolphin import io, ps, stack, utils
+from dolphin import io, ps, stack
 from dolphin._log import log_runtime, setup_logging
 from dolphin._types import Filename
 from dolphin.workflows import s1_disp
@@ -18,6 +18,7 @@ from dolphin.workflows.config import (
     ShpMethod,
 )
 from opera_utils import make_nodata_mask
+
 from disp_nisar._common import NISAR_DATASET_NAME
 
 logger = logging.getLogger("dolphin")
@@ -283,11 +284,9 @@ def _form_vrt_stack(
 ) -> stack.VRTStack:
     logger.info("creating a VRTStack...")
 
-    outfile = Path(f"slc_stack.vrt")
+    outfile = Path("slc_stack.vrt")
     if not outfile.exists():
-        vrt = stack.VRTStack(
-            slc_files, subdataset=NISAR_DATASET_NAME, outfile=outfile
-        )
+        vrt = stack.VRTStack(slc_files, subdataset=NISAR_DATASET_NAME, outfile=outfile)
     else:
         vrt = stack.VRTStack.from_vrt_file(outfile, skip_size_check=True)
 
@@ -337,7 +336,7 @@ def _run_one_stack(
     # Get the nearest amplitude mean/dispersion files
     cur_slc_files = slc_file_list[slc_idx_start:slc_idx_end]
     cfg = _create_cfg(
-        slc_files=list(comp_slc_files) + cur_slc_files,
+        slc_files=list(comp_slc_files) + list(cur_slc_files),
         amplitude_mean_files=all_amp_files,
         amplitude_dispersion_files=all_disp_files,
         work_dir=cur_path,
@@ -379,7 +378,7 @@ def main(arg_dict: dict) -> None:
     logger.info(f"Found {len(all_slc_files)} total SLC files")
 
     vrt_stack = _form_vrt_stack(slc_files=all_slc_files)
-    vrt_file_list = vrt_stack.file_list 
+    vrt_file_list = vrt_stack.file_list
 
     # Get the pre-compted PS files (assuming --pre-compute has been run)
     all_amp_files = sorted(Path("precomputed_ps/").resolve().glob("*_amp_mean.tif"))
@@ -396,7 +395,7 @@ def main(arg_dict: dict) -> None:
     # TODO: how to make it shift when the year changes for PS files
 
     # Make the first ministack
-    cur_slc_files = vrt_file_list[slc_idx_start: slc_idx_end]
+    cur_slc_files = vrt_file_list[slc_idx_start:slc_idx_end]
     cfg = _create_cfg(
         slc_files=cur_slc_files,
         first_ministack=True,

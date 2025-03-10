@@ -23,10 +23,9 @@ from dolphin.workflows.config import (
 )
 from dolphin.workflows.config._common import _read_file_list_or_glob
 from opera_utils import (
-    # OPERA_DATASET_NAME,
-    get_frame_bbox,
     PathOrStr,
     get_dates,
+    # OPERA_DATASET_NAME,
     sort_files_by_date,
 )
 from pydantic import ConfigDict, Field, field_validator
@@ -124,6 +123,7 @@ class DynamicAncillaryFileGroup(YamlModel):
 
 class StaticAncillaryFileGroup(YamlModel):
     """Group for files which remain static over time."""
+
     frame_to_bounds_json: Union[Path, None] = Field(
         None,
         description=(

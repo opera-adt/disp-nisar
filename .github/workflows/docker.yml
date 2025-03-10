@@ -22,5 +22,5 @@ jobs:
         with:
           fetch-depth: 0
       - run: docker build --network=host --tag=disp-nisar --file=docker/Dockerfile .
-      - run: docker run --rm -t disp-nisar 
+      - run: docker run --rm -t disp-nisar
       # - run: docker run --rm test/disp-nisar gdalinfo NETCDF:/disp-nisar/tests/data/ALPSRP096740680-L1.0_GSLC.h5:/science/LSAR/GSLC/grids/frequencyA/HH

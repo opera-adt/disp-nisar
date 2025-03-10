@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import subprocess
 from pathlib import Path
 
@@ -6,6 +7,7 @@ from disp_nisar.enums import ProcessingMode
 # Note on ionosphere/troposphere files:
 # The ionosphere corrections are to be read from gunw files which is missing.
 # The troposphere corrections are to be created separately.
+
 
 def setup_delivery(cfg_dir: Path, mode: ProcessingMode):
     """Set up the dolphin config file for the delivery for one mode."""
@@ -16,7 +18,8 @@ def setup_delivery(cfg_dir: Path, mode: ProcessingMode):
         "dolphin config "
         f" --keep-paths-relative --work scratch/{mode.value} --strides 4 4"
         # Inputs:
-        " --slc-files ./input_slcs/*h5 --subdataset /science/LSAR/GSLC/grids/frequencyA/HH"
+        " --slc-files ./input_slcs/*h5 --subdataset"
+        " /science/LSAR/GSLC/grids/frequencyA/HH"
         # Phase linking stuff
         f" --ministack-size 15 {single_flag}"
         # Dynamic ancillary files #
@@ -45,8 +48,8 @@ if __name__ == "__main__":
     static_ancillary_dir = Path("static_ancillary_files")
     # Rosamond, track 01:
     frame_id = 150
-    frequency = 'frequencyA'
-    polarization = 'HH'
+    frequency = "frequencyA"
+    polarization = "HH"
     reference_json = "opera-disp-nisar-reference-dates-dummy.json"
     frame_to_bounds_json = "Frame_to_bounds_DISP-NI_v0.1.json"
     # Creates one file for the forward mode and one for the historical mode.

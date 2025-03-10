@@ -95,7 +95,6 @@ def create_filename(
     project: str = "OPERA",
     level: str = "L3",
     name: str = "DISP-NI",
-    mode: str = "IW",
     version: str = "0.10",
 ) -> str:
     """Build the filename similar to DISP-NI production naming convention.
