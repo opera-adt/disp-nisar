@@ -6,7 +6,7 @@ src/disp_nisar/_version.py
 docs/reference
 
 # Testing data dir
-data/
+# data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
