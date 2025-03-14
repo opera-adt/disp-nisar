@@ -16,7 +16,7 @@ def setup_delivery(cfg_dir: Path, mode: ProcessingMode):
     outfile = f"{cfg_dir}/dolphin_config_{mode.value}.yaml"
     cmd = (
         "dolphin config "
-        f" --keep-paths-relative --work scratch/{mode.value} --strides 4 4"
+        f" --keep-paths-relative --work scratch/{mode.value} --strides 6 6"
         # Inputs:
         " --slc-files ./input_slcs/*h5 --subdataset"
         " /science/LSAR/GSLC/grids/frequencyA/HH"
