@@ -11,7 +11,7 @@ phase_linking:
   #   Type: integer.
   ministack_size: 100
   # Maximum number of compressed images to use in sequential estimator. If there are more
-  #   ministacks than this, the earliest CCSLCs will be left out of the later stacks. .
+  #   ministacks than this, the earliest CGSLCs will be left out of the later stacks. .
   #   Type: integer.
   max_num_compressed: 100
   # Index of input SLC to use for making phase linked interferograms after EVD/EMI.
@@ -257,12 +257,12 @@ output_options:
   #   Type: object | null.
   output_resolution:
   # Alternative to specifying output resolution: Specify the (x, y) strides (decimation
-  #   factor) to perform while processing input. For example, strides of [4, 2] would turn an
-  #   input resolution of [5, 10] into an output resolution of [20, 20].
+  #   factor) to perform while processing input. For example, strides of [6, 6] would turn an
+  #   input resolution of [5, 5] into an output resolution of [30, 30].
   #   Type: object.
   strides:
     x: 6
-    y: 3
+    y: 6
   # Area of interest: [left, bottom, right, top] coordinates. e.g.
   #   `bbox=[-150.2,65.0,-150.1,65.5]`.
   #   Type: array | null.

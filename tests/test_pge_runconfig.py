@@ -38,7 +38,7 @@ def test_run_config_schema():
 @pytest.fixture
 def input_file_group(slc_file_list_nc_with_sds):
     file_list, subdataset = slc_file_list_nc_with_sds
-    return InputFileGroup(cslc_file_list=file_list, frame_id=11114)
+    return InputFileGroup(gslc_file_list=file_list, frame_id=11114)
 
 
 @pytest.fixture
@@ -185,23 +185,23 @@ def sample_slc_list():
     dates = "20170610T000000Z_20170610T000000Z_20171001T000000Z_20240429T000000Z"
     return [
         Path(__file__).parent
-        / f"data/COMPRESSED_OPERA_L2_CSLC_NI_F150_{dates}_NI_HH_v0.1.h5",
+        / f"data/COMPRESSED_NISAR_L2_GSLC_NI_F150_{dates}_NI_HH_v0.1.h5",
         # This is the compressed SLC where the "base phase" date within a later
         # reference date. So we expected output index of 1:
-        "COMPRESSED_OPERA_L2_CSLC_NI_F150_20170709T000000Z_20170709T000000Z_20171201T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
-        "COMPRESSED_OPERA_L2_CSLC_NI_F150_20170709T000000Z_20171210T000000Z_20180604T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180610T161531Z_20240429T233903Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180622T161532Z_20240430T025857Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180628T161614Z_20240430T043443Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180710T161615Z_20240428T043529Z_NI_HH_v0.1.h5",
+        "COMPRESSED_NISAR_L2_GSLC_NI_F150_20170709T000000Z_20170709T000000Z_20171201T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
+        "COMPRESSED_NISAR_L2_GSLC_NI_F150_20170709T000000Z_20171210T000000Z_20180604T000000Z_20240429T000000Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180610T161531Z_20240429T233903Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180622T161532Z_20240430T025857Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180628T161614Z_20240430T043443Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180710T161615Z_20240428T043529Z_NI_HH_v0.1.h5",
         # This one should become the "extra reference":
-        "OPERA_L2_CSLC_NI_F150_20180716T161534Z_20240428T062045Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180722T161616Z_20240428T075037Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180728T161534Z_20240428T093746Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180803T161616Z_20240428T110636Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180809T161535Z_20240428T125546Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180815T161617Z_20240428T143339Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20180827T161618Z_20240428T175537Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180716T161534Z_20240428T062045Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180722T161616Z_20240428T075037Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180728T161534Z_20240428T093746Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180803T161616Z_20240428T110636Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180809T161535Z_20240428T125546Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180815T161617Z_20240428T143339Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20180827T161618Z_20240428T175537Z_NI_HH_v0.1.h5",
     ]
 
 
@@ -246,7 +246,7 @@ def test_reference_changeover(
     sample_slc_list,
 ):
     rc = RunConfig(
-        input_file_group=InputFileGroup(cslc_file_list=sample_slc_list, frame_id=23210),
+        input_file_group=InputFileGroup(gslc_file_list=sample_slc_list, frame_id=23210),
         primary_executable=PrimaryExecutable(),
         dynamic_ancillary_file_group=dynamic_ancillary_file_group,
         static_ancillary_file_group=static_ancillary_file_group,
@@ -262,10 +262,10 @@ def test_reference_changeover(
     # Check a that non-exact match to the reference still works,
     # AFTER the reference request
     sample_slc_list[7] = (
-        "OPERA_L2_CSLC_NI_F150_20180717T161534Z_20240428T062045Z_NI_HH_v0.1.h5"
+        "NISAR_L2_GSLC_NI_F150_20180717T161534Z_20240428T062045Z_NI_HH_v0.1.h5"
     )
     rc = RunConfig(
-        input_file_group=InputFileGroup(cslc_file_list=sample_slc_list, frame_id=23210),
+        input_file_group=InputFileGroup(gslc_file_list=sample_slc_list, frame_id=23210),
         primary_executable=PrimaryExecutable(),
         dynamic_ancillary_file_group=dynamic_ancillary_file_group,
         static_ancillary_file_group=static_ancillary_file_group,
@@ -278,10 +278,10 @@ def test_reference_changeover(
 
     # ...but not BEFORE the reference request
     sample_slc_list[7] = (
-        "OPERA_L2_CSLC_NI_F150_20180715T161534Z_20240428T062045Z_NI_HH_v0.1.h5"
+        "NISAR_L2_GSLC_NI_F150_20180715T161534Z_20240428T062045Z_NI_HH_v0.1.h5"
     )
     rc = RunConfig(
-        input_file_group=InputFileGroup(cslc_file_list=sample_slc_list, frame_id=23210),
+        input_file_group=InputFileGroup(gslc_file_list=sample_slc_list, frame_id=23210),
         primary_executable=PrimaryExecutable(),
         dynamic_ancillary_file_group=dynamic_ancillary_file_group,
         static_ancillary_file_group=static_ancillary_file_group,
@@ -298,11 +298,11 @@ def _make_frame_files(
 ) -> list[str]:
     comp_slcs = [
         # Note the fake (start, end) datetimes since we dont use those for these testes
-        f"COMPRESSED_OPERA_F150_{d.strftime('%Y%m%dT%H%M%S')}_20200101_20210101.h5"
+        f"COMPRESSED_NISAR_F150_{d.strftime('%Y%m%dT%H%M%S')}_20200101_20210101.h5"
         for d in sensing_time_list[:num_compressed]
     ]
     real_slcs = [
-        f"OPERA_F150_{d.strftime('%Y%m%dT%H%M%S')}.h5"
+        f"NISAR_F150_{d.strftime('%Y%m%dT%H%M%S')}.h5"
         for d in sensing_time_list[num_compressed:]
     ]
     return comp_slcs + real_slcs
@@ -328,8 +328,8 @@ def test_reference_date_computation():
         datetime.datetime(2020, 8, 21, 16, 13, 4),
         datetime.datetime(2020, 9, 2, 16, 13, 5),
     ]
-    cslc_file_list = _make_frame_files(sensing_time_list, 0)
-    random.shuffle(cslc_file_list)
+    gslc_file_list = _make_frame_files(sensing_time_list, 0)
+    random.shuffle(gslc_file_list)
 
     # Assume we nominally will reset the reference each august
     reference_datetimes = [datetime.datetime(y, 8, 1) for y in range(2018, 2025)]
@@ -340,7 +340,7 @@ def test_reference_date_computation():
     # this is be 2020-08-09
     output_reference_idx, extra_reference_date = pge_runconfig._compute_reference_dates(
         reference_datetimes,
-        cslc_file_list,
+        gslc_file_list,
         compressed_slc_plan=CompressedSlcPlan.ALWAYS_FIRST,
     )
     assert output_reference_idx == 0
@@ -365,8 +365,8 @@ def test_reference_first_in_stack():
         datetime.datetime(2017, 3, 26, 0, 0),
         datetime.datetime(2017, 4, 7, 0, 0),
     ]
-    cslc_file_list = _make_frame_files(sensing_time_list, 0)
-    random.shuffle(cslc_file_list)
+    gslc_file_list = _make_frame_files(sensing_time_list, 0)
+    random.shuffle(gslc_file_list)
 
     # Assume we nominally will reset the reference each august
     reference_datetimes = [datetime.datetime(y, 8, 1) for y in range(2018, 2025)]
@@ -391,7 +391,7 @@ def test_reference_first_in_stack():
     # - the "extra reference date" will be the None
     output_reference_idx, extra_reference_date = pge_runconfig._compute_reference_dates(
         reference_datetimes,
-        cslc_file_list,
+        gslc_file_list,
         compressed_slc_plan=CompressedSlcPlan.ALWAYS_FIRST,
     )
     assert output_reference_idx == 0
@@ -399,20 +399,20 @@ def test_reference_first_in_stack():
 
 
 def test_repeated_compressed_dates():
-    cslc_file_list = [
+    gslc_file_list = [
         "compressed_F150_20180722_20190412_20190705.h5",
         "compressed_F150_20190711_20190711_20191003.h5",
         "compressed_F150_20190711_20191009_20200107.h5",
         "compressed_F150_20190711_20200113_20200406.h5",
         "compressed_F150_20200717_20200412_20200729.h5",
-        "OPERA_L2_CSLC_NI_F150_20200804T161629Z_20240501T010610Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20200810T161548Z_20240501T030849Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20200816T161630Z_20240501T042747Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20200822T161548Z_20240501T062744Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20200828T161631Z_20240501T075057Z_NI_HH_v0.1.h5",
-        "OPERA_L2_CSLC_NI_F150_20200903T161549Z_20240501T094950Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20200804T161629Z_20240501T010610Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20200810T161548Z_20240501T030849Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20200816T161630Z_20240501T042747Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20200822T161548Z_20240501T062744Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20200828T161631Z_20240501T075057Z_NI_HH_v0.1.h5",
+        "NISAR_L2_GSLC_NI_F150_20200903T161549Z_20240501T094950Z_NI_HH_v0.1.h5",
     ]
-    random.shuffle(cslc_file_list)
+    random.shuffle(gslc_file_list)
 
     reference_datetimes = [
         datetime.datetime(2017, 7, 9),
@@ -424,7 +424,7 @@ def test_repeated_compressed_dates():
 
     output_reference_idx, extra_reference_date = pge_runconfig._compute_reference_dates(
         reference_datetimes,
-        cslc_file_list,
+        gslc_file_list,
         compressed_slc_plan=CompressedSlcPlan.ALWAYS_FIRST,
     )
     # Should be the latest one: the compressed slc with 20200717
@@ -451,10 +451,10 @@ def test_reference_date_last_per_ministack():
         datetime.datetime(2017, 3, 26, 0, 0),
         datetime.datetime(2017, 4, 7, 0, 0),
     ]
-    cslc_file_list = _make_frame_files(
+    gslc_file_list = _make_frame_files(
         sensing_time_list=sensing_time_list, num_compressed=0
     )
-    random.shuffle(cslc_file_list)
+    random.shuffle(gslc_file_list)
 
     # Assume we nominally will reset the reference each august
     reference_datetimes = []
@@ -462,21 +462,21 @@ def test_reference_date_last_per_ministack():
     # - The "output index" should be 0: this is the first ministack
     # - the "extra reference date" will be the None
     output_reference_idx, extra_reference_date = pge_runconfig._compute_reference_dates(
-        reference_datetimes, cslc_file_list, compressed_slc_plan=compressed_slc_plan
+        reference_datetimes, gslc_file_list, compressed_slc_plan=compressed_slc_plan
     )
     assert output_reference_idx == 0
     assert extra_reference_date is None
 
     # Now add compressed, and not that output reference index should be the latest one
     for num_compressed in range(1, 6):
-        cslc_file_list = _make_frame_files(
+        gslc_file_list = _make_frame_files(
             sensing_time_list=sensing_time_list, num_compressed=num_compressed
         )
-        random.shuffle(cslc_file_list)
+        random.shuffle(gslc_file_list)
         output_reference_idx, extra_reference_date = (
             pge_runconfig._compute_reference_dates(
                 reference_datetimes,
-                cslc_file_list,
+                gslc_file_list,
                 compressed_slc_plan=compressed_slc_plan,
             )
         )

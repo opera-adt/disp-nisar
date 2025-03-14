@@ -38,30 +38,30 @@ from .enums import ImagingFrequency, Polarization, ProcessingMode
 class InputFileGroup(YamlModel):
     """Inputs for A group of input files."""
 
-    cslc_file_list: List[Path] = Field(
+    gslc_file_list: List[Path] = Field(
         default_factory=list,
-        description="list of paths to CSLC files.",
+        description="list of paths to GSLC files.",
     )
     frame_id: int = Field(
         ...,
-        description="Frame ID of the cslcs contained in `cslc_file_list`.",
+        description="Frame ID of the gslcs contained in `gslc_file_list`.",
     )
     frequency: str = Field(
         default=ImagingFrequency.A.value,
-        description="Frequency in which cslcs are acquired.",
+        description="Frequency in which gslcs are acquired.",
     )
     polarization: str = Field(
         default=Polarization.HH.value,
-        description="Polarization of the cslcs contained in `cslc_file_list`.",
+        description="Polarization of the gslcs contained in `gslc_file_list`.",
     )
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
-            "required": ["cslc_file_list", "frame_id", "frequency", "polarization"]
+            "required": ["gslc_file_list", "frame_id", "frequency", "polarization"]
         },
     )
 
-    _check_cslc_file_glob = field_validator("cslc_file_list", mode="before")(
+    _check_gslc_file_glob = field_validator("gslc_file_list", mode="before")(
         _read_file_list_or_glob
     )
 
@@ -73,15 +73,6 @@ class DynamicAncillaryFileGroup(YamlModel):
         default=...,
         description="Path to file containing SAS algorithm parameters.",
     )
-    # geometry_files: List[Path] = Field(
-    #     default_factory=list,
-    #     alias="static_layers_files",
-    #     description=(
-    #         "Paths to the CSLC static_layer files (1 per burst) with line-of-sight"
-    #         " unit vectors. If none provided, corrections using CSLC static_layer are"
-    #         " skipped."
-    #     ),
-    # )
     mask_file: Optional[Path] = Field(
         None,
         description=(
@@ -296,8 +287,8 @@ class RunConfig(YamlModel):
         # the output directory, and the scratch directory.
         # All the other things come from the AlgorithmParameters.
 
-        # PGE doesn't sort the CSLCs in date order (or any order?)
-        cslc_file_list = sort_files_by_date(self.input_file_group.cslc_file_list)[0]
+        # PGE doesn't sort the GSLCs in date order (or any order?)
+        gslc_file_list = sort_files_by_date(self.input_file_group.gslc_file_list)[0]
         scratch_directory = self.product_path_group.scratch_path
         mask_file = self.dynamic_ancillary_file_group.mask_file
         gunw_files = self.dynamic_ancillary_file_group.gunw_files
@@ -332,20 +323,20 @@ class RunConfig(YamlModel):
         #     frame_id=frame_id, json_file=frame_to_burst_file
         # )
         bounds_epsg, bounds = get_nisar_frame_bbox(
-            self.input_file_group.cslc_file_list[0]
+            self.input_file_group.gslc_file_list[0]
         )
 
         # TODO: if the frame id is given in config, check for consistency of data
-        # and the given frame id by reading frame id from the CSLCs
+        # and the given frame id by reading frame id from the GSLCs
 
         # Check for consistency of frame and burst ids
         # frame_burst_ids = set(
         #     get_burst_ids_for_frame(frame_id=frame_id, json_file=frame_to_burst_file)
         # )
-        # data_burst_ids = set(group_by_burst(cslc_file_list).keys())
+        # data_burst_ids = set(group_by_burst(gslc_file_list).keys())
         # mismatched_bursts = data_burst_ids - frame_burst_ids
         # if mismatched_bursts:
-        #     raise ValueError("The CSLC data and frame id do not match")
+        #     raise ValueError("The GSLC data and frame id do not match")
 
         # Setup the OPERA-specific options to adjust from dolphin's defaults
         input_options = {
@@ -367,7 +358,7 @@ class RunConfig(YamlModel):
         # Compute the requested output indexes
         output_reference_idx, extra_reference_date = _compute_reference_dates(
             reference_datetimes,
-            cslc_file_list,
+            gslc_file_list,
             algo_params.phase_linking.compressed_slc_plan,
         )
         param_dict["phase_linking"]["output_reference_idx"] = output_reference_idx
@@ -377,7 +368,7 @@ class RunConfig(YamlModel):
         # to be created separately
         # unpacked to load the rest of the parameters for the DisplacementWorkflow
         return DisplacementWorkflow(
-            cslc_file_list=cslc_file_list,
+            cslc_file_list=gslc_file_list,
             input_options=input_options,
             mask_file=mask_file,
             work_directory=scratch_directory,
@@ -432,7 +423,7 @@ class RunConfig(YamlModel):
         # TODO: check correction options here: iono, tropo, geometry
         return cls(
             input_file_group=InputFileGroup(
-                cslc_file_list=workflow.cslc_file_list,
+                gslc_file_list=workflow.cslc_file_list,
                 frame_id=frame_id,
                 frequency=frequency,
                 polarization=polarization,
@@ -492,22 +483,22 @@ def _get_first_after_selected(
 
 def _compute_reference_dates(
     reference_datetimes: Iterable[datetime.datetime],
-    cslc_file_list: Iterable[PathOrStr],
+    gslc_file_list: Iterable[PathOrStr],
     compressed_slc_plan: CompressedSlcPlan,
 ) -> tuple[int, datetime.datetime | None]:
-    # Get the dates of the base phase (works for either compressed, or regular cslc)
-    cur_files = sort_files_by_date(cslc_file_list)[0]
+    # Get the dates of the base phase (works for either compressed, or regular gslc)
+    cur_files = sort_files_by_date(gslc_file_list)[0]
     # Mark any files beginning with "compressed" as compressed
     is_compressed = ["compressed" in str(Path(f).stem).lower() for f in cur_files]
     input_dates = [get_dates(f)[0].date() for f in cur_files]
-    num_ccslc = sum(is_compressed)
+    num_cgslc = sum(is_compressed)
 
     # If we have set the compressed_slc_plan to be the last per ministack,
     # we want to make the shortest baseline interferograms.
     # So we should make the output index relative to the most recent compressed SLC
     # https://github.com/isce-framework/dolphin/blob/14ac66e49a8e8e66e9b74fc9eb4f0d232ab0924c/src/dolphin/stack.py#L488
     if compressed_slc_plan == CompressedSlcPlan.LAST_PER_MINISTACK:
-        output_reference_idx = max(0, num_ccslc - 1)
+        output_reference_idx = max(0, num_cgslc - 1)
         # No extra reference date: this would need dolphin , as currently (2026-02-10)
         # the `sequential` workflow uses the extra date to decide what
         # `new_compressed_slc_reference_idx` should be.

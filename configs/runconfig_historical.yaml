@@ -1,22 +1,22 @@
 input_file_group:
-  # REQUIRED: list of paths to CSLC files.
+  # REQUIRED: list of paths to GSLC files.
   #   Type: array.
-  cslc_file_list:
-  # REQUIRED: Frame ID of the bursts contained in `cslc_file_list`.
+  gslc_file_list:
+  # REQUIRED: Frame ID of the bursts contained in `gslc_file_list`.
   #   Type: integer.
   frame_id:
-  # REQUIRED: Frequency in which cslcs are acquired.
+  # REQUIRED: Frequency in which gslcs are acquired.
   #   Type: string.
   frequency: frequencyA
-  # REQUIRED: Polarization of the cslcs contained in `cslc_file_list`.
+  # REQUIRED: Polarization of the gslcs contained in `gslc_file_list`.
   #   Type: string.
   polarization: HH
 dynamic_ancillary_file_group:
   # REQUIRED: Path to file containing SAS algorithm parameters.
   #   Type: string.
   algorithm_parameters_file: algorithm_parameters_historical.yaml
-  # Paths to the CSLC static_layer files (1 per burst) with line-of-sight unit vectors. If
-  #   none provided, corrections using CSLC static_layer are skipped.
+  # Paths to the GSLC static_layer files (1 per burst) with line-of-sight unit vectors. If
+  #   none provided, corrections using GSLC static_layer are skipped.
   #   Type: array.
   mask_file:
   # Path to the DEM file covering full frame. If none provided, corrections using DEM are
@@ -24,7 +24,7 @@ dynamic_ancillary_file_group:
   #   Type: string | null.
   dem_file:
   # List of paths to gunw files for ionosphere correction. They are interferograms and need
-  #   to cover the date range in CSLC data list. If none
+  #   to cover the date range in GSLC data list. If none
   #   provided, ionosphere corrections are skipped.
   #   Type: array | null.
   gunw_files:
