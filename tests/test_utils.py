@@ -7,7 +7,6 @@ from dolphin.workflows import UnwrapOptions
 from shapely import from_wkt
 
 from disp_nisar._utils import (
-    METERS_TO_RADIANS_Lband,
     _convert_meters_to_radians,
     _create_correlation_images,
     _update_snaphu_conncomps,
@@ -20,7 +19,7 @@ UNW_FILE = DATA_DIR / "20160716_20160809.unw.tif"
 
 
 @pytest.fixture
-def ts_filenames(tmp_path) -> list[Path]:
+def ts_filenames(tmp_path, wavelength) -> list[Path]:
     end_date = 20160809
     filenames: list[Path] = []
 
@@ -28,7 +27,9 @@ def ts_filenames(tmp_path) -> list[Path]:
     ramp_rad = (np.arange(0, 512).reshape(512, 1) / 10) * np.ones((1, 512))
     ramp_rad += np.random.randn(*ramp_rad.shape)
 
-    rad_to_meters = 1 / METERS_TO_RADIANS_Lband
+    METERS_TO_RADIANS = (-4 * np.pi) / wavelength
+
+    rad_to_meters = 1 / METERS_TO_RADIANS
     ramp_meters = ramp_rad * rad_to_meters
 
     for i in range(3):
@@ -39,10 +40,11 @@ def ts_filenames(tmp_path) -> list[Path]:
     return filenames
 
 
-def test_create_correlations(ts_filenames):
+def test_create_correlations(ts_filenames, wavelength):
     output_paths = _create_correlation_images(
         ts_filenames=ts_filenames,
         num_workers=1,
+        wavelength=wavelength,
     )
     assert len(output_paths) == 3
     for path in output_paths:
@@ -57,16 +59,18 @@ def test_create_correlations(ts_filenames):
         assert 0.2 < data.mean() < 0.8
 
 
-def test_convert_meters_to_radians(ts_filenames):
+def test_convert_meters_to_radians(ts_filenames, wavelength):
     """Test that _convert_meters_to_radians correctly creates scaled files."""
-    unw_scaled_paths = _convert_meters_to_radians(ts_filenames)
+    unw_scaled_paths = _convert_meters_to_radians(ts_filenames, wavelength)
 
     assert len(unw_scaled_paths) == 3
     assert unw_scaled_paths[0] == ts_filenames[0].with_suffix(".radians.tif")
     assert unw_scaled_paths[0].exists()
 
     # Read the data through the VRT to verify the scaling
-    expected_scale_factor = METERS_TO_RADIANS_Lband
+    wavelength = 0.23
+    METERS_TO_RADIANS = (-4 * np.pi) / wavelength
+    expected_scale_factor = METERS_TO_RADIANS
     for unw_p, ts_p in zip(unw_scaled_paths, ts_filenames, strict=True):
         scaled_data = io.load_gdal(unw_p)
         disp_meters = io.load_gdal(ts_p)
@@ -78,10 +82,11 @@ def test_convert_meters_to_radians(ts_filenames):
         ), "Data read through VRT does not match expected scaled values"
 
 
-def test_update_snaphu_conncomps(ts_filenames):
+def test_update_snaphu_conncomps(ts_filenames, wavelength):
     cor_paths = _create_correlation_images(
         ts_filenames=ts_filenames,
         num_workers=1,
+        wavelength=wavelength,
     )
     mask_path = str(ts_filenames[0]) + ".mask.tif"
     cols, rows = io.get_raster_xysize(ts_filenames[0])

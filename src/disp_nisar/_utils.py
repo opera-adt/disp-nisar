@@ -9,12 +9,13 @@ from pathlib import Path
 import numpy as np
 import shapely.ops
 from dolphin import PathOrStr, io
-from dolphin._types import Bbox
-from dolphin.constants import NISAR_L_WAVELENGTH, NISAR_S_WAVELENGTH
+from dolphin._types import Bbox, Filename
+from dolphin.constants import SPEED_OF_LIGHT
 from dolphin.interferogram import estimate_correlation_from_phase
 from dolphin.unwrap import grow_conncomp_snaphu
 from dolphin.utils import full_suffix
 from dolphin.workflows.config import UnwrapOptions
+from opera_utils._cslc import _get_dset_and_attrs
 from osgeo import gdal
 from shapely import wkt
 from shapely.geometry import LinearRing, MultiPolygon, Polygon
@@ -23,9 +24,6 @@ from tqdm.contrib.concurrent import thread_map
 logger = logging.getLogger(__name__)
 
 gdal.UseExceptions()
-
-METERS_TO_RADIANS_Lband = (-4 * np.pi) / NISAR_L_WAVELENGTH
-METERS_TO_RADIANS_Sband = (-4 * np.pi) / NISAR_S_WAVELENGTH
 
 
 def _update_snaphu_conncomps(
@@ -123,6 +121,7 @@ def _update_spurt_conncomps(
 
 def _create_correlation_images(
     ts_filenames: Sequence[PathOrStr],
+    wavelength: float,
     window_size: tuple[int, int] = (11, 11),
     keep_bits: int = 8,
     num_workers: int = 3,
@@ -142,8 +141,9 @@ def _create_correlation_images(
         ifg_path, cor_path = args
         logger.debug(f"Estimating correlation for {ifg_path}, writing to {cor_path}")
         disp = io.load_gdal(ifg_path)
-        # TODO: Need to figure which freqency: Lband or Sband
-        disp_rad = disp * METERS_TO_RADIANS_Lband
+
+        METERS_TO_RADIANS = (-4 * np.pi) / wavelength
+        disp_rad = disp * METERS_TO_RADIANS
 
         cor = estimate_correlation_from_phase(disp_rad, window_size=window_size)
         if keep_bits:
@@ -272,14 +272,17 @@ def split_on_antimeridian(polygon: Polygon) -> MultiPolygon:
     return MultiPolygon(polys)
 
 
-def _convert_meters_to_radians(timeseries_paths: Sequence[Path]) -> list[Path]:
+def _convert_meters_to_radians(
+    timeseries_paths: Sequence[Path], wavelength: float
+) -> list[Path]:
     """Copy over .tif, rescaling units from meters to radians."""
     output_files: list[Path] = []
-    # TODO: Lband or Sband
+    METERS_TO_RADIANS = (-4 * np.pi) / wavelength
+
     for in_path in timeseries_paths:
         out_path = in_path.with_suffix(".radians.tif")
         io.write_arr(
-            arr=METERS_TO_RADIANS_Lband * io.load_gdal(in_path),
+            arr=METERS_TO_RADIANS * io.load_gdal(in_path),
             like_filename=in_path,
             output_name=out_path,
         )
@@ -311,7 +314,9 @@ def get_nisar_frame_bbox(cslc_file: Path) -> tuple[int, Bbox]:
         if cslc_file.suffix in {".h5", ".hdf5"}:
             try:
                 # Extract EPSG code
-                epsg = src["/science/LSAR/GSLC/metadata/radarGrid/projection"][()]
+                # epsg = src["/science/LSAR/GSLC/metadata/radarGrid/projection"][()]
+                # NISAR bounding Polygon epsg is always 4326 for North America
+                epsg = 4326
 
                 # Extract and process bounding polygon
                 bounding_polygon = src["/science/LSAR/identification/boundingPolygon"][
@@ -342,3 +347,10 @@ def get_nisar_frame_bbox(cslc_file: Path) -> tuple[int, Bbox]:
             )
 
     return epsg, Bbox(*bounds)
+
+
+def _frequency_to_wavelength(frequency: str, gslc_file: Filename) -> float:
+    dset = f"/science/LSAR/GSLC/grids/{frequency}/centerFrequency"
+    center_frequency = _get_dset_and_attrs(filename=gslc_file, dset_name=dset)[0]
+    wavelength = SPEED_OF_LIGHT / center_frequency
+    return wavelength

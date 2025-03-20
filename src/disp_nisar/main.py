@@ -30,6 +30,7 @@ from ._reference import ReferencePoint, read_reference_point
 from ._utils import (
     _convert_meters_to_radians,
     _create_correlation_images,
+    _frequency_to_wavelength,
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
 )
@@ -102,16 +103,24 @@ def run(
     # corrections differently
     # Run dolphin's displacement workflow
     out_paths = run_displacement(cfg=cfg, debug=debug)
+    # TODO:
     # Read the ionosphere phase screen for timeseries from GUNW files
+    # And the solid earth tides. do we need the geometry?
     out_paths.ionospheric_corrections = read_ionosphere_phase_screen(
         pge_runconfig.dynamic_ancillary_file_group.gunw_files,
         out_paths.timeseries_paths,
+    )
+
+    # Obtain wavelength based on frequency
+    wavelength = _frequency_to_wavelength(
+        pge_runconfig.input_file_group.frequency, cfg.cslc_file_list[0]
     )
 
     create_products(
         out_paths=out_paths,
         cfg=cfg,
         pge_runconfig=pge_runconfig,
+        wavelength=wavelength,
         processing_start_datetime=processing_start_datetime,
     )
 
@@ -127,6 +136,7 @@ def create_products(
     out_paths: OutputPaths,
     cfg: DisplacementWorkflow,
     pge_runconfig: RunConfig,
+    wavelength: float,
     processing_start_datetime: datetime | None = None,
 ):
     """Create NetCDF products from the outputs of dolphin's displacement workflow.
@@ -139,6 +149,8 @@ def create_products(
         `DisplacementWorkflow` object for controlling the workflow.
     pge_runconfig : disp_nisar.pge_config.RunConfig
         PGE-specific metadata for the output product.
+    wavelength : float
+        The wavelength in which the data is acquired
     processing_start_datetime : datetime.datetime, optional
         The processing start datetime. If not provided, datetime.now() is used.
 
@@ -212,6 +224,7 @@ def create_products(
     if set(group_by_date(out_paths.stitched_cor_paths).keys()) != disp_date_keys:
         out_paths.stitched_cor_paths = _create_correlation_images(
             out_paths.timeseries_paths,
+            wavelength=wavelength,
             window_size=(11, 11),
         )
     # if set(group_by_date(out_paths.cor_paths).keys()) != disp_date_keys:
@@ -225,7 +238,9 @@ def create_products(
     if set(group_by_date(out_paths.conncomp_paths).keys()) != disp_date_keys:
         # TODO: need to set the frequency properly based on input data or config
         logger.info("Converting timeseries rasters to radians")
-        timeseries_rad_paths = _convert_meters_to_radians(out_paths.timeseries_paths)
+        timeseries_rad_paths = _convert_meters_to_radians(
+            out_paths.timeseries_paths, wavelength=wavelength
+        )
         method = cfg.unwrap_options.unwrap_method
         if method in ("snaphu", "phass", "whirlwind"):
             row_looks, col_looks = cfg.phase_linking.half_window.to_looks()
@@ -272,6 +287,7 @@ def create_products(
         date_to_cslc_files=date_to_cslc_files,
         pge_runconfig=pge_runconfig,
         dolphin_config=cfg,
+        wavelength=wavelength,
         processing_start_datetime=processing_start_datetime,
         reference_point=ref_point,
         los_east_file=los_east_file,
@@ -375,6 +391,7 @@ def process_product(
     date_to_cslc_files: Mapping[tuple[datetime], list[Path]],
     pge_runconfig: RunConfig,
     dolphin_config: DisplacementWorkflow,
+    wavelength: float,
     processing_start_datetime: datetime,
     reference_point: ReferencePoint | None = None,
     los_east_file: Path | None = None,
@@ -395,6 +412,8 @@ def process_product(
         Configuration object for the PGE run.
     dolphin_config : dolphin.workflows.DisplacementWorkflow
         Configuration object run by `dolphin`.
+    wavelength : float
+        The wavelength in which data is acquired.
     processing_start_datetime : datetime.datetime
         The processing start datetime.
     reference_point : ReferencePoint, optional
@@ -455,6 +474,7 @@ def process_product(
         near_far_incidence_angles=near_far_incidence_angles,
         pge_runconfig=pge_runconfig,
         dolphin_config=dolphin_config,
+        radar_wavelength=wavelength,
         reference_cslc_files=ref_slc_files,
         secondary_cslc_files=secondary_slc_files,
         corrections=corrections,
@@ -471,6 +491,7 @@ def create_displacement_products(
     date_to_cslc_files: Mapping[tuple[datetime], list[Path]],
     pge_runconfig: RunConfig,
     dolphin_config: DisplacementWorkflow,
+    wavelength: float,
     processing_start_datetime: datetime,
     reference_point: ReferencePoint | None = None,
     los_east_file: Path | None = None,
@@ -493,6 +514,8 @@ def create_displacement_products(
         Configuration object for the PGE run.
     dolphin_config : dolphin.workflows.DisplacementWorkflow
         Configuration object run by `dolphin`.
+    wavelength : float
+        The wavelength in which data is acquired.
     processing_start_datetime : datetime.datetime
         The processing start datetime.
     reference_point : ReferencePoint, optional
@@ -556,6 +579,7 @@ def create_displacement_products(
                 repeat(date_to_cslc_files),
                 repeat(pge_runconfig),
                 repeat(dolphin_config),
+                repeat(wavelength),
                 repeat(processing_start_datetime),
                 repeat(reference_point),
                 repeat(los_east_file),
