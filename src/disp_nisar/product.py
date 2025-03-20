@@ -23,17 +23,15 @@ from dolphin.utils import DummyProcessPoolExecutor, format_dates
 from dolphin.workflows import DisplacementWorkflow, YamlModel
 from numpy.typing import ArrayLike, DTypeLike
 from opera_utils import (
-    # OPERA_DATASET_NAME,
     filter_by_date,
     get_dates,
-    get_radar_wavelength,
     get_zero_doppler_time,
     parse_filename,
 )
 
 from . import __version__ as disp_nisar_version
 from ._baselines import _interpolate_data, compute_baselines
-from ._common import DATETIME_FORMAT, NISAR_DATASET_NAME
+from ._common import DATETIME_FORMAT, NISAR_DATASET_NAME, NISAR_ZERO_DOPPLER
 from ._reference import ReferencePoint
 from ._utils import extract_footprint
 from .browse_image import make_browse_image_from_arr
@@ -90,6 +88,7 @@ def create_output_product(
     water_mask_filename: Filename | None,
     pge_runconfig: RunConfig,
     dolphin_config: DisplacementWorkflow,
+    radar_wavelength: float,
     reference_cslc_files: Sequence[Filename],
     secondary_cslc_files: Sequence[Filename],
     processing_start_datetime: datetime.datetime,
@@ -128,6 +127,8 @@ def create_output_product(
         Used to add extra metadata to the output file.
     dolphin_config : dolphin.workflows.DisplacementWorkflow
         Configuration object run by `dolphin`.
+    radar_wavelength : float
+        The wavelength in which data is acquired.
     reference_cslc_files : Sequence[Filename]
         Input CSLC products corresponding to the reference date.
         Used for metadata generation.
@@ -182,14 +183,29 @@ def create_output_product(
     reference_start_file, reference_end_file = _get_start_end_cslcs(
         reference_cslc_files
     )
-    reference_start_time = get_zero_doppler_time(reference_start_file, type_="start")
-    reference_end_time = get_zero_doppler_time(reference_end_file, type_="end")
+    reference_start_time = get_zero_doppler_time(
+        reference_start_file,
+        dataset=f"{NISAR_ZERO_DOPPLER}/zeroDopplerStartTime",
+        datetime_format="%Y-%m-%dT%H:%M:%S.%f",
+    )
+    reference_end_time = get_zero_doppler_time(
+        reference_end_file,
+        dataset=f"{NISAR_ZERO_DOPPLER}/zeroDopplerEndTime",
+        datetime_format="%Y-%m-%dT%H:%M:%S.%f",
+    )
 
     secondary_start, secondary_end = _get_start_end_cslcs(secondary_cslc_files)
-    secondary_start_time = get_zero_doppler_time(secondary_start, type_="start")
-    secondary_end_time = get_zero_doppler_time(secondary_end, type_="end")
+    secondary_start_time = get_zero_doppler_time(
+        secondary_start,
+        dataset=f"{NISAR_ZERO_DOPPLER}/zeroDopplerStartTime",
+        datetime_format="%Y-%m-%dT%H:%M:%S.%f",
+    )
+    secondary_end_time = get_zero_doppler_time(
+        secondary_end,
+        dataset=f"{NISAR_ZERO_DOPPLER}/zeroDopplerEndTime",
+        datetime_format="%Y-%m-%dT%H:%M:%S.%f",
+    )
 
-    radar_wavelength = get_radar_wavelength(reference_cslc_files[0])
     phase2disp = -1 * float(radar_wavelength) / (4.0 * np.pi)
 
     y, x = _create_yx_arrays(gt=gt, shape=shape)
@@ -204,6 +220,7 @@ def create_output_product(
             x=x,
             y=y,
             epsg=crs.to_epsg(),
+            wavelength=radar_wavelength,
             height=0,
         )
     except Exception:
@@ -758,16 +775,16 @@ def _create_identification_group(
             attrs={"units": "unitless"},
         )
         input_dts = sorted(
-            [get_dates(f)[0] for f in pge_runconfig.input_file_group.cslc_file_list]
+            [get_dates(f)[0] for f in pge_runconfig.input_file_group.gslc_file_list]
         )
         processing_dts = sorted(
             get_dates(f)[1]
-            for f in pge_runconfig.input_file_group.cslc_file_list
+            for f in pge_runconfig.input_file_group.gslc_file_list
             if "compressed" not in str(f).lower()
         )
         parsed_files = [
             parse_filename(f)
-            for f in pge_runconfig.input_file_group.cslc_file_list
+            for f in pge_runconfig.input_file_group.gslc_file_list
             if "compressed" not in str(f).lower()
         ]
         input_sensors = {p.get("sensor") for p in parsed_files if p.get("sensor")}
@@ -841,7 +858,7 @@ def _create_identification_group(
             group=identification_group,
             name="ceos_number_of_input_granules",
             dimensions=(),
-            data=len(pge_runconfig.input_file_group.cslc_file_list),
+            data=len(pge_runconfig.input_file_group.gslc_file_list),
             fillvalue=None,
             description="Number of input data granule used during processing.",
             attrs={"units": "unitless"},
@@ -934,7 +951,7 @@ def _create_identification_group(
             name="source_data_file_list",
             dimensions=(),
             data=",".join(
-                p.stem for p in pge_runconfig.input_file_group.cslc_file_list
+                p.stem for p in pge_runconfig.input_file_group.gslc_file_list
             ),
             fillvalue=None,
             description=(
