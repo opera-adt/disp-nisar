@@ -291,7 +291,6 @@ class RunConfig(YamlModel):
         gslc_file_list = sort_files_by_date(self.input_file_group.gslc_file_list)[0]
         scratch_directory = self.product_path_group.scratch_path
         mask_file = self.dynamic_ancillary_file_group.mask_file
-        gunw_files = self.dynamic_ancillary_file_group.gunw_files
         # geometry_files = self.dynamic_ancillary_file_group.geometry_files
         # ionosphere_files = self.dynamic_ancillary_file_group.ionosphere_files
         # troposphere_files = self.dynamic_ancillary_file_group.troposphere_files
@@ -377,7 +376,7 @@ class RunConfig(YamlModel):
             correction_options=CorrectionOptions(
                 # ionosphere_files=ionosphere_files,
                 # troposphere_files=troposphere_files,
-                geometry_files=[gunw_files[0]],
+                # geometry_files=[gunw_files[0]],
                 dem_file=dem_file,
             ),
             log_file=self.log_file,
