@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
-  - python>=3.9
+  - python>=3.9,<3.12
   - pip>=21.3  # https://pip.pypa.io/en/stable/reference/build-system/pyproject-toml/#editable-installation
   - git  # for pip install, due to setuptools_scm
   - click>=7.0
@@ -25,6 +25,6 @@ dependencies:
   - isce3-cpu>=0.16.0 # For baseline
   - tophu
   # - cxx-compiler # for whirlwind
-  # - dolphin>=0.36.0
+  - dolphin>=0.5.0
   - pip:
     - spurt>=0.1.0
