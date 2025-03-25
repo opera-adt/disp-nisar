@@ -31,7 +31,7 @@ from opera_utils import (
 
 from . import __version__ as disp_nisar_version
 from ._baselines import _interpolate_data, compute_baselines
-from ._common import DATETIME_FORMAT, NISAR_DATASET_NAME, NISAR_ZERO_DOPPLER
+from ._common import DATETIME_FORMAT, NISAR_DATASET_NAME, NISAR_IDENTIFICATION_GROUP
 from ._reference import ReferencePoint
 from ._utils import extract_footprint
 from .browse_image import make_browse_image_from_arr
@@ -185,24 +185,24 @@ def create_output_product(
     )
     reference_start_time = get_zero_doppler_time(
         reference_start_file,
-        dataset=f"{NISAR_ZERO_DOPPLER}/zeroDopplerStartTime",
+        dataset=f"{NISAR_IDENTIFICATION_GROUP}/zeroDopplerStartTime",
         datetime_format="%Y-%m-%dT%H:%M:%S.%f",
     )
     reference_end_time = get_zero_doppler_time(
         reference_end_file,
-        dataset=f"{NISAR_ZERO_DOPPLER}/zeroDopplerEndTime",
+        dataset=f"{NISAR_IDENTIFICATION_GROUP}/zeroDopplerEndTime",
         datetime_format="%Y-%m-%dT%H:%M:%S.%f",
     )
 
     secondary_start, secondary_end = _get_start_end_cslcs(secondary_cslc_files)
     secondary_start_time = get_zero_doppler_time(
         secondary_start,
-        dataset=f"{NISAR_ZERO_DOPPLER}/zeroDopplerStartTime",
+        dataset=f"{NISAR_IDENTIFICATION_GROUP}/zeroDopplerStartTime",
         datetime_format="%Y-%m-%dT%H:%M:%S.%f",
     )
     secondary_end_time = get_zero_doppler_time(
         secondary_end,
-        dataset=f"{NISAR_ZERO_DOPPLER}/zeroDopplerEndTime",
+        dataset=f"{NISAR_IDENTIFICATION_GROUP}/zeroDopplerEndTime",
         datetime_format="%Y-%m-%dT%H:%M:%S.%f",
     )
 
