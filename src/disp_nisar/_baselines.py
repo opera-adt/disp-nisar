@@ -72,8 +72,8 @@ def compute_baselines(
     # wavelength = get_radar_wavelength(h5file_ref)
     side = isce3.core.LookSide.Right
 
-    orbit_ref = get_cslc_orbit(h5file_ref, is_nisar=True)
-    orbit_sec = get_cslc_orbit(h5file_sec, is_nisar=True)
+    orbit_ref = get_cslc_orbit(h5file_ref)
+    orbit_sec = get_cslc_orbit(h5file_sec)
 
     baselines = []
     for lon, lat in zip(lon_arr, lat_arr):
