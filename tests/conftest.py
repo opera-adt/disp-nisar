@@ -35,6 +35,12 @@ def slc_stack():
 
 
 @pytest.fixture()
+def wavelength():
+    wavelength = 0.23
+    return wavelength
+
+
+@pytest.fixture()
 def slc_file_list_nc_with_sds(tmp_path, slc_stack):
     """Save NetCDF files with multiple valid datsets."""
     start_date = 20220101

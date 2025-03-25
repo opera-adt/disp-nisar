@@ -5,7 +5,6 @@ from dolphin._types import Filename
 from numpy.typing import ArrayLike
 from opera_utils import (
     get_cslc_orbit,
-    get_radar_wavelength,
 )
 from pyproj import CRS, Transformer
 
@@ -28,6 +27,7 @@ def compute_baselines(
     x: ArrayLike,
     y: ArrayLike,
     epsg: int,
+    wavelength: float,
     height: float = 0.0,
     threshold: float = 1e-08,
     maxiter: int = 50,
@@ -69,7 +69,6 @@ def compute_baselines(
 
     ellipsoid = isce3.core.Ellipsoid()
     zero_doppler = isce3.core.LUT2d()
-    wavelength = get_radar_wavelength(h5file_ref)
     side = isce3.core.LookSide.Right
 
     orbit_ref = get_cslc_orbit(h5file_ref)

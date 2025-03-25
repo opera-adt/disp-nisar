@@ -39,7 +39,9 @@ def read_ionosphere_phase_screen(
         logger.info(f"Number of output files: {len(output_timeseries_files)}")
 
         # Placeholder for future implementation
-        output_paths = output_timeseries_files
+        # TODO: check for the design matrix of the gunw files network
+        # to be full rank
+        output_paths = None  # output_timeseries_files
         return output_paths
     else:
         return None
