@@ -188,3 +188,79 @@ def dem(
         s3_key=s3_key,
         debug=debug,
     )
+
+
+@download_group.command()
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    default="water_binary_mask.tif",
+    help="Output water mask filepath",
+)
+@click.option("--frame-id", type=int, help="Frame ID to get bbox from")
+@click.option(
+    "-b", "--bbox", type=float, nargs=4, help="Bounding box (WSEN, decimal degrees)"
+)
+@click.option(
+    "-m", "--margin", type=int, default=5, help="Margin for bounding box in km"
+)
+@click.option(
+    "--land-buffer",
+    type=int,
+    default=1,
+    help="Buffer in km for land water regions (lakes, rivers)",
+)
+@click.option(
+    "--ocean-buffer",
+    type=int,
+    default=1,
+    help="Buffer in km for ocean water regions",
+)
+@click.option(
+    "--aws-profile",
+    default="saml-pub",
+    help="AWS profile name for S3 authentication",
+)
+@click.option(
+    "--aws-region",
+    default="us-west-2",
+    help="AWS region",
+)
+@click.option("--debug/--no-debug", default=False, help="Enable debug logging")
+def water_mask(
+    output: Path,
+    frame_id: int | None,
+    bbox: Bbox | None,
+    margin: int,
+    land_buffer: int,
+    ocean_buffer: int,
+    aws_profile: str,
+    aws_region: str,
+    debug: bool,
+) -> None:
+    """Download and create a binary water mask for a geographic region.
+
+    The water mask is downloaded from S3 and processed to create a binary mask.
+    Either --frame-id or --bbox must be provided.
+    """
+    from disp_nisar._water import create_water_mask
+
+    if frame_id is None and bbox is None:
+        raise click.UsageError("Must provide --frame-id or --bbox")
+    if frame_id is not None and bbox is not None:
+        raise click.UsageError("Only may provide --frame-id or --bbox, not both")
+
+    create_water_mask(
+        frame_id=frame_id,
+        bbox=bbox,
+        output=output,
+        margin=margin,
+        land_buffer=land_buffer,
+        ocean_buffer=ocean_buffer,
+        debug=debug,
+        aws_profile=aws_profile,
+        aws_region=aws_region,
+    )
+
+    click.echo(f"Water mask created: {output}")

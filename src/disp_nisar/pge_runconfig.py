@@ -6,7 +6,7 @@ import datetime
 import json
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, ClassVar, List, Optional, Union
+from typing import Any, ClassVar, List, Literal, Optional, Union
 
 from dolphin.stack import CompressedSlcPlan
 from dolphin.workflows.config import (
@@ -53,6 +53,15 @@ class InputFileGroup(YamlModel):
     polarization: str = Field(
         default=Polarization.HH.value,
         description="Polarization of the gslcs contained in `gslc_file_list`.",
+    )
+    last_processed: Optional[datetime.datetime] = Field(
+        None,
+        description=(
+            "(For FORWARD/'Catch up' HISTORICAL processing mode) last processed date"
+            " for the frame. If provided, the SAS will only output products whose"
+            " secondary datetime is *after* `last_processed`. Otherwise, the SAS will"
+            " output all products."
+        ),
     )
     model_config = ConfigDict(
         extra="forbid",
@@ -115,6 +124,13 @@ class DynamicAncillaryFileGroup(YamlModel):
 class StaticAncillaryFileGroup(YamlModel):
     """Group for files which remain static over time."""
 
+    algorithm_parameters_overrides_json: Union[Path, None] = Field(
+        None,
+        description=(
+            "JSON file containing frame-specific algorithm parameters to override the"
+            " defaults passed in the `algorithm_parameters.yaml`."
+        ),
+    )
     frame_to_bounds_json: Union[Path, None] = Field(
         None,
         description=(
@@ -132,7 +148,7 @@ class StaticAncillaryFileGroup(YamlModel):
 class PrimaryExecutable(YamlModel):
     """Group describing the primary executable."""
 
-    product_type: str = Field(
+    product_type: Literal["DISP_NISAR_FORWARD", "DISP_NISAR_HISTORICAL"] = Field(
         default="DISP_NISAR_FORWARD",
         description="Product type of the PGE.",
     )
@@ -175,14 +191,6 @@ class ProductPathGroup(YamlModel):
 class AlgorithmParameters(YamlModel):
     """Class containing all the other `DisplacementWorkflow` classes."""
 
-    algorithm_parameters_overrides_json: Union[Path, None] = Field(
-        None,
-        description=(
-            "JSON file containing frame-specific algorithm parameters to override the"
-            " defaults passed in the `algorithm_parameters.yaml`."
-        ),
-    )
-
     # Options for each step in the workflow
     ps_options: PsOptions = Field(default_factory=PsOptions)
     phase_linking: PhaseLinkingOptions = Field(default_factory=PhaseLinkingOptions)
@@ -214,6 +222,13 @@ class AlgorithmParameters(YamlModel):
             " `recommended_temporal_coherence_threshold` are masked."
         ),
     )
+    recommended_use_conncomp: bool = Field(
+        False,
+        description=(
+            "When creating `recommended_mask`, use the `connected_component_label`"
+            " layer to hide pixels whose label == 0."
+        ),
+    )
     # Extra product creation options
     spatial_wavelength_cutoff: float = Field(
         25_000,
@@ -232,8 +247,24 @@ class AlgorithmParameters(YamlModel):
     num_parallel_products: int = Field(
         3, description="Number of output products to create in parallel."
     )
+    forward_mode_network_size: int = Field(
+        3,
+        ge=3,
+        le=4,
+        description=(
+            "When running forward mode, size of the interferogram network to form with"
+            " the latest date. Valid choices are 3 (default) and 4"
+        ),
+    )
 
     model_config = ConfigDict(extra="forbid")
+
+    def model_post_init(self, context: Any) -> None:  # noqa: ARG002, D102
+        # The DISP-NISAR SAS does not use these aux. rasters
+        if hasattr(self.phase_linking, "write_closure_phase"):
+            self.phase_linking.write_closure_phase = False
+        if hasattr(self.phase_linking, "write_crlb"):
+            self.phase_linking.write_crlb = False
 
 
 class RunConfig(YamlModel):
@@ -308,7 +339,12 @@ class RunConfig(YamlModel):
         algorithm_parameters = AlgorithmParameters.from_yaml(
             self.dynamic_ancillary_file_group.algorithm_parameters_file,
         )
-        new_parameters = _override_parameters(algorithm_parameters, frame_id=frame_id)
+        overrides_file = (
+            self.static_ancillary_file_group.algorithm_parameters_overrides_json
+        )
+        new_parameters = _override_parameters(
+            algorithm_parameters, overrides_file=overrides_file, frame_id=frame_id
+        )
         # regenerate to ensure all defaults remained in updated version
         algo_params = AlgorithmParameters(**new_parameters.model_dump())
         param_dict = algo_params.model_dump()
@@ -341,6 +377,7 @@ class RunConfig(YamlModel):
         input_options = {
             "subdataset": nisar_dataset_name
         }  # param_dict.pop("subdataset")}
+        param_dict["output_options"]["epsg"] = bounds_epsg
         param_dict["output_options"]["bounds"] = bounds
         param_dict["output_options"]["bounds_epsg"] = bounds_epsg
         # Always turn off overviews (won't be saved in the HDF5 anyway)
@@ -349,6 +386,11 @@ class RunConfig(YamlModel):
         param_dict["timeseries_options"]["run_velocity"] = False
         # Always use L1 minimization for inverting unwrapped networks
         param_dict["timeseries_options"]["method"] = "L1"
+        # Ignore the new parameter to mask outputs
+        param_dict["timeseries_options"]["apply_mask_to_timeseries"] = False
+        # Always turn off CRLB/closure phase rasters
+        param_dict["phase_linking"]["write_crlb"] = False
+        param_dict["phase_linking"]["write_closure_phase"] = False
 
         # Get the current set of expected reference dates
         reference_datetimes = _parse_reference_date_json(
@@ -363,8 +405,12 @@ class RunConfig(YamlModel):
         param_dict["phase_linking"]["output_reference_idx"] = output_reference_idx
         param_dict["output_options"]["extra_reference_date"] = extra_reference_date
 
-        # TODO: the iono corrections to be read from gunws, tropo corrections
-        # to be created separately
+        # Handle forward mode network
+        if self.primary_executable.product_type == "DISP_NISAR_FORWARD":
+            param_dict["interferogram_network"] = _create_forward_mode_network(
+                algo_params.forward_mode_network_size
+            )
+
         # unpacked to load the rest of the parameters for the DisplacementWorkflow
         return DisplacementWorkflow(
             cslc_file_list=gslc_file_list,
@@ -454,14 +500,15 @@ class RunConfig(YamlModel):
 
 
 def _override_parameters(
-    algorithm_parameters: AlgorithmParameters, frame_id: int
+    algorithm_parameters: AlgorithmParameters,
+    overrides_file: Path | None,
+    frame_id: int,
 ) -> AlgorithmParameters:
     param_dict = algorithm_parameters.model_dump()
-    # Get the "override" file for this set of parameters
-    overrides_json = param_dict.pop("algorithm_parameters_overrides_json")
-
     # Load any overrides for this frame
-    override_params = _parse_algorithm_overrides(overrides_json, frame_id)
+    override_params = _parse_algorithm_overrides(
+        overrides_file=overrides_file, frame_id=frame_id
+    )
 
     # Override the dict with the new options
     param_dict = _nested_update(param_dict, override_params)
@@ -553,11 +600,11 @@ def _parse_reference_date_json(
 
 
 def _parse_algorithm_overrides(
-    override_file: Path | str | None, frame_id: int | str
+    overrides_file: Path | str | None, frame_id: int | str
 ) -> dict[str, Any]:
     """Find the frame-specific parameters to override for algorithm_parameters."""
-    if override_file is not None:
-        with open(override_file) as f:
+    if overrides_file is not None:
+        with open(overrides_file) as f:
             overrides = json.load(f)
             if "data" in overrides:
                 return overrides["data"].get(str(frame_id), {})
@@ -573,3 +620,28 @@ def _nested_update(base: dict, updates: dict):
         else:
             base[k] = v
     return base
+
+
+def _create_forward_mode_network(nearest_n: int = 3) -> InterferogramNetwork:
+    """Create a smaller interferogram network using only the last date.
+
+    For forward mode where we only wish to produce one new product,
+    we can unwrap just a subset of the full network (which is,
+    for 15 new SLC dates, a network of 42 interferograms).
+
+    Since we use nearest-3 unwrapping, we can just use the last 4 dates,
+    create that nearest-3 network, and unwrap it.
+    We use dolphin's "manual index" option in the `InterferogramNetwork` to
+    select the last 4 dates.
+    """
+    indexes = [
+        (-2, -1),
+        (-3, -1),
+        (-4, -1),
+        (-3, -2),
+        (-4, -2),
+        (-4, -3),
+    ]
+    if nearest_n == 4:
+        indexes.extend([(-5, -1), (-5, -2), (-5, -3), (-5, -2)])
+    return InterferogramNetwork(indexes=indexes)

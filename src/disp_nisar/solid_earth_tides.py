@@ -1,3 +1,9 @@
+"""Solid Earth Tides calculation for NISAR InSAR data.
+
+This module calculates solid earth tides corrections using pysolid,
+adapted from disp-s1 for NISAR data processing.
+"""
+
 import logging
 from datetime import date, datetime
 from typing import Literal, TypeAlias, TypeVar
@@ -33,7 +39,6 @@ def resample_to_target(
     return out
 
 
-# TODO: Does this function have to be changed to read from the GUNW products?
 def calculate_solid_earth_tides_correction(
     like_filename: Filename,
     reference_start_time: DateTimeLike,

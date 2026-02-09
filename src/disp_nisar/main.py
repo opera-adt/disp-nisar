@@ -3,11 +3,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
-from datetime import datetime, timezone
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from itertools import repeat
 from multiprocessing import get_context
 from pathlib import Path
 from typing import NamedTuple
+
+import numpy as np
 
 from dolphin import PathOrStr, io, stitching
 from dolphin._log import log_runtime, setup_logging
@@ -65,6 +68,28 @@ def run(
     # Add a check to fail if passed duplicate dates area passed
     _assert_no_duplicate_dates(cfg.cslc_file_list)
 
+    # Handle forward mode - get second to last date for re-referencing
+    gslc_dates = [get_dates(f)[0] for f in cfg.cslc_file_list]
+    sorted_dates = sorted([d for d in gslc_dates if d is not None])
+    second_to_last_date = sorted_dates[-2]
+    # Strip timezones defensively
+    second_to_last_date = second_to_last_date.replace(tzinfo=None)
+
+    if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":
+        if (
+            last_processed := pge_runconfig.input_file_group.last_processed
+        ) is not None:
+            last_processed = last_processed.replace(tzinfo=None)
+            if abs(last_processed - second_to_last_date).total_seconds() > 24 * 3600:
+                raise ValueError(
+                    "last_processed is set, more than 24 hours away from the"
+                    " second-to-last. This is not allowed for forward mode."
+                )
+        else:
+            pge_runconfig.input_file_group.last_processed = (
+                second_to_last_date + timedelta(days=1)
+            )
+
     # Setup the binary mask as dolphin expects
     if pge_runconfig.dynamic_ancillary_file_group.mask_file:
         water_binary_mask = cfg.work_directory / "water_binary_mask.tif"
@@ -99,16 +124,45 @@ def run(
         # Drop the PS threshold to a conservative number to avoid false positives
         cfg.ps_options.amp_dispersion_threshold = 0.15
 
-    # TODO: modify run_displacement to not run stitching for nisar and do
-    # corrections differently
     # Run dolphin's displacement workflow
+    # Note: For NISAR, there's no stitching needed since it's one huge frame
     out_paths = run_displacement(cfg=cfg, debug=debug)
-    # TODO:
+
+    assert out_paths.timeseries_paths is not None
+    assert out_paths.timeseries_residual_paths is not None
+
+    # Handle forward mode re-referencing
+    if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":
+        from dolphin.timeseries import _redo_reference
+
+        logger.info(f"Re-referencing time series rasters {out_paths.timeseries_paths}")
+        logger.info(f"Setting output reference to {second_to_last_date}")
+        final_ts_paths, final_residual_paths = _redo_reference(
+            out_paths.timeseries_paths,
+            out_paths.timeseries_residual_paths,
+            second_to_last_date,
+            bad_pixel_mask=np.ma.nomask,
+        )
+        out_paths.timeseries_paths = final_ts_paths
+        out_paths.timeseries_residual_paths = final_residual_paths
+
+    # Filter by last processed date
+    if last_processed := pge_runconfig.input_file_group.last_processed:
+        logger.info(f"Filtering outputs before {last_processed}")
+        logger.info(
+            f"Before filtering: {len(out_paths.timeseries_paths)} outputs"
+        )
+        out_paths = _filter_before_last_processed(out_paths, last_processed)
+        logger.info(
+            f"After filtering: {len(out_paths.timeseries_paths)} outputs"
+        )
+
     # Read the ionosphere phase screen for timeseries from GUNW files
-    # And the solid earth tides. do we need the geometry?
     out_paths.ionospheric_corrections = read_ionosphere_phase_screen(
         pge_runconfig.dynamic_ancillary_file_group.gunw_files,
         out_paths.timeseries_paths,
+        frequency=pge_runconfig.input_file_group.frequency,
+        polarization=pge_runconfig.input_file_group.polarization,
     )
 
     # Obtain wavelength based on frequency
@@ -333,6 +387,31 @@ def _assert_dates_match(
         msg = f"Mismatch of dates found for {name}:"
         msg += f"{disp_date_keys = }, but {name} has {test_paths}"
         raise ValueError(msg)
+
+
+def _filter_before_last_processed(
+    out_paths: OutputPaths, last_processed: datetime
+) -> OutputPaths:
+    """Filter `out_paths` to products with secondary datetime > `last_processed`."""
+    # For the following attributes, filter based on last_processed
+    out_dict = asdict(out_paths)
+    # We can add a time buffer of a day, since the minimum repeat is 12 days for NISAR
+    time_buffer = timedelta(days=1)
+    for attr in [
+        "stitched_ifg_paths",
+        "stitched_cor_paths",
+        "conncomp_paths",
+        "timeseries_paths",
+        "timeseries_residual_paths",
+    ]:
+        cur_files = getattr(out_paths, attr)
+        if cur_files is None:
+            continue
+        # Overwrite the attribute with the filtered files
+        out_dict[attr] = [
+            p for p in cur_files if get_dates(p)[1] > (last_processed + time_buffer)
+        ]
+    return OutputPaths(**out_dict)
 
 
 def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:
