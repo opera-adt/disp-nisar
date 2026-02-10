@@ -18,7 +18,7 @@ input_file_group:
 dynamic_ancillary_file_group:
   # REQUIRED: Path to file containing SAS algorithm parameters.
   #   Type: string.
-  algorithm_parameters_file: algorithm_parameters_historical.yaml
+  algorithm_parameters_file: algorithm_parameters_forward.yaml
   # Paths to the GSLC static_layer files (1 per burst) with line-of-sight unit vectors. If
   #   none provided, corrections using GSLC static_layer are skipped.
   #   Type: array.
@@ -50,17 +50,17 @@ static_ancillary_file_group:
 primary_executable:
   # Product type of the PGE.
   #   Type: string.
-  product_type: DISP_NISAR_HISTORICAL
+  product_type: DISP_NISAR_FORWARD
 product_path_group:
   # REQUIRED: Directory where PGE will place results.
   #   Type: string.
-  product_path: output/historical
+  product_path: output/forward
   # Path to the scratch directory.
   #   Type: string.
-  scratch_path: scratch/historical
+  scratch_path: scratch/forward
   # Path to the SAS output directory.
   #   Type: string.
-  sas_output_path: output/historical
+  sas_output_path: output/forward
   # Version of the product, in <major>.<minor> format.
   #   Type: string.
   product_version: '0.4'
@@ -87,4 +87,4 @@ worker_settings:
     - 512
 # Path to the output log file in addition to logging to stderr.
 #   Type: string | null.
-log_file: scratch/historical/log_sas.log
+log_file: scratch/forward/log_sas.log
