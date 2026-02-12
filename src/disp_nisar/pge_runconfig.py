@@ -358,7 +358,9 @@ class RunConfig(YamlModel):
         #     frame_id=frame_id, json_file=frame_to_burst_file
         # )
         bounds_epsg, bounds = get_nisar_frame_bbox(
-            self.input_file_group.gslc_file_list[0]
+            self.input_file_group.gslc_file_list[0],
+            frequency=frequency,
+            polarization=polarization,
         )
 
         # TODO: if the frame id is given in config, check for consistency of data

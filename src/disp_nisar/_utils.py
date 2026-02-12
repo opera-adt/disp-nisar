@@ -290,13 +290,19 @@ def _convert_meters_to_radians(
     return output_files
 
 
-def get_nisar_frame_bbox(cslc_file: Path) -> tuple[int, Bbox]:
+def get_nisar_frame_bbox(
+    cslc_file: Path, frequency: str = "frequencyA", polarization: str = "HH"
+) -> tuple[int, Bbox]:
     """Extract the EPSG code and bounding box from a NISAR CSLC file.
 
     Parameters
     ----------
     cslc_file : Path
         path to the NISAR CSLC file (.h5 or .hdf5)
+    frequency : str
+        Frequency band to use (default: "frequencyA")
+    polarization : str
+        Polarization to use (default: "HH")
 
     Returns
     -------
@@ -308,34 +314,28 @@ def get_nisar_frame_bbox(cslc_file: Path) -> tuple[int, Bbox]:
     ValueError: If required metadata is missing
 
     """
-    import h5py
+    if cslc_file.suffix in {".h5", ".hdf5"}:
+        # Use GDAL to read the actual raster's CRS and bounds from the HDF5 dataset
+        # This ensures we get the native projection (e.g., UTM) not the bounding polygon's 4326
+        subdataset = f'NETCDF:"{cslc_file}":/science/LSAR/GSLC/grids/{frequency}/{polarization}'
+        ds = gdal.Open(subdataset)
+        if ds is None:
+            raise ValueError(f"Could not open subdataset {subdataset}")
 
-    with h5py.File(cslc_file, "r") as src:
-        if cslc_file.suffix in {".h5", ".hdf5"}:
-            try:
-                # Extract EPSG code
-                # epsg = src["/science/LSAR/GSLC/metadata/radarGrid/projection"][()]
-                # NISAR bounding Polygon epsg is always 4326 for North America
-                epsg = 4326
+        # Get the actual raster CRS
+        crs = io.get_raster_crs(subdataset)
+        epsg = crs.to_epsg()
+        if epsg is None:
+            raise ValueError(f"Could not determine EPSG from {subdataset}")
 
-                # Extract and process bounding polygon
-                bounding_polygon = src["/science/LSAR/identification/boundingPolygon"][
-                    ()
-                ]
+        # Get the actual raster bounds
+        bounds = io.get_raster_bounds(subdataset)
+        ds = None
+    else:
+        import h5py
 
-                if isinstance(bounding_polygon, bytes):
-                    bounding_polygon = bounding_polygon.decode("utf-8")
-
-                # Convert WKT to Polygon and get bounds
-                polygon_2d = Polygon(
-                    [(x, y) for x, y, *_ in wkt.loads(bounding_polygon).exterior.coords]
-                )
-                bounds = polygon_2d.bounds
-
-            except KeyError as e:
-                raise ValueError(f"Required metadata missing in NISAR file: {e}")
-        else:
-            # Alternative format handling
+        # Alternative format handling (non-NISAR HDF5)
+        with h5py.File(cslc_file, "r") as src:
             epsg = src["data"]["spatial_ref"][()]
             data = src["data"]
 
