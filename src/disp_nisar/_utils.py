@@ -290,7 +290,9 @@ def _convert_meters_to_radians(
 
 
 def get_nisar_frame_bbox(
-    cslc_file: Path, frequency: str = "frequencyA", polarization: str = "HH"
+    cslc_file: Path,
+    frequency: str = "frequencyA",
+    polarization: str = "HH",  # noqa: ARG001
 ) -> tuple[int, Bbox]:
     """Extract the EPSG code and bounding box from a NISAR CSLC file.
 
