@@ -70,15 +70,15 @@ def read_ionosphere_from_gunw(
     )
     with h5py.File(gunw_file, "r") as f:
         if iono_path not in f:
-            logger.warning(f"Ionosphere dataset not found at {iono_path} in {gunw_file}")
+            logger.warning(
+                f"Ionosphere dataset not found at {iono_path} in {gunw_file}"
+            )
             return None
         iono_data = f[iono_path][()]
     return iono_data
 
 
-def build_design_matrix(
-    ifg_date_pairs: list[tuple], unique_dates: list
-) -> np.ndarray:
+def build_design_matrix(ifg_date_pairs: list[tuple], unique_dates: list) -> np.ndarray:
     """Build design matrix for inverting interferograms to timeseries.
 
     Parameters
@@ -266,8 +266,8 @@ def read_ionosphere_phase_screen(
     output_dir = output_timeseries_files[0].parent / "ionosphere"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_paths = []
-    output_dates = [get_dates(f) for f in output_timeseries_files]
+    output_paths: list[Path | None] = []
+    [get_dates(f) for f in output_timeseries_files]
 
     # Match timeseries dates to output dates and write files
     for out_file in output_timeseries_files:

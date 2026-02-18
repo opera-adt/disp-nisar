@@ -40,14 +40,13 @@ def load_s1_override_frames(
     gpd.GeoDataFrame
         S1 frames filtered to those with overrides, with an 'overrides'
         column containing the override dict for each frame.
+
     """
     with open(s1_overrides_path) as f:
         s1_overrides = json.load(f)
 
     # Read the S1 frame DB with fid as index (1-based frame IDs)
-    s1_gdf = gpd.read_file(
-        s1_frames_path, engine="pyogrio", fid_as_index=True
-    )
+    s1_gdf = gpd.read_file(s1_frames_path, engine="pyogrio", fid_as_index=True)
     s1_gdf.index.name = "frame_id"
 
     # Filter to only frames that have overrides
@@ -55,9 +54,7 @@ def load_s1_override_frames(
     s1_gdf = s1_gdf.loc[s1_gdf.index.intersection(override_ids)].copy()
 
     # Attach overrides as a column
-    s1_gdf["overrides"] = s1_gdf.index.map(
-        lambda fid: s1_overrides[str(fid)]
-    )
+    s1_gdf["overrides"] = s1_gdf.index.map(lambda fid: s1_overrides[str(fid)])
 
     click.echo(
         f"Loaded {len(s1_gdf)} S1 frames with overrides "
@@ -87,6 +84,7 @@ def map_overrides_to_nisar(
     -------
     dict
         Mapping of NISAR frame_idx (as string) to override parameters.
+
     """
     # Reset S1 index so frame_id becomes a column for sjoin
     s1_reset = s1_gdf.reset_index()
@@ -123,8 +121,7 @@ def map_overrides_to_nisar(
             n_matched += 1
 
     click.echo(
-        f"Mapped overrides to {n_matched} NISAR frames "
-        f"(out of {len(nisar_gdf)} total)."
+        f"Mapped overrides to {n_matched} NISAR frames (out of {len(nisar_gdf)} total)."
     )
     return nisar_overrides
 
@@ -183,9 +180,7 @@ def main(s1_overrides: str, s1_frames: str, nisar_frames: str, output: str):
             hw["y"] = max_val
 
     # Sort by frame_idx for readability
-    nisar_overrides = dict(
-        sorted(nisar_overrides.items(), key=lambda x: int(x[0]))
-    )
+    nisar_overrides = dict(sorted(nisar_overrides.items(), key=lambda x: int(x[0])))
 
     # Write output
     with open(output, "w") as f:

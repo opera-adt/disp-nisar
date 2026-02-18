@@ -19,7 +19,11 @@ def _get_look_side(h5file: Filename) -> isce3.core.LookSide:
             "/identification/lookDirection",
         ]:
             if path in hf:
-                look_dir = hf[path][()].decode() if isinstance(hf[path][()], bytes) else hf[path][()]
+                look_dir = (
+                    hf[path][()].decode()
+                    if isinstance(hf[path][()], bytes)
+                    else hf[path][()]
+                )
                 break
         else:
             # Default to right if not found

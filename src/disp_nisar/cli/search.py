@@ -30,9 +30,7 @@ def _get_nisar_bbox(file_path: Path) -> Bbox:
         else:
             epsg_code = int(epsg_code)
 
-    transformer = Transformer.from_crs(
-        f"EPSG:{epsg_code}", "EPSG:4326", always_xy=True
-    )
+    transformer = Transformer.from_crs(f"EPSG:{epsg_code}", "EPSG:4326", always_xy=True)
     lon_min, lat_min = transformer.transform(x_coords.min(), y_coords.min())
     lon_max, lat_max = transformer.transform(x_coords.max(), y_coords.max())
     return Bbox(lon_min, lat_min, lon_max, lat_max)
@@ -42,17 +40,16 @@ def _find_intersecting_frames(
     gdf: gpd.GeoDataFrame, query_bbox: Bbox
 ) -> gpd.GeoDataFrame:
     """Return GeoDataFrame of frames whose geometry intersects the query bbox."""
-    query_geom = box(query_bbox.left, query_bbox.bottom,
-                     query_bbox.right, query_bbox.top)
+    query_geom = box(
+        query_bbox.left, query_bbox.bottom, query_bbox.right, query_bbox.top
+    )
     return gdf[gdf.geometry.intersects(query_geom)]
 
 
-def _print_bbox_results(
-    query_bbox: Bbox, gdf_match: gpd.GeoDataFrame
-) -> None:
+def _print_bbox_results(query_bbox: Bbox, gdf_match: gpd.GeoDataFrame) -> None:
     """Print the table of intersecting frames."""
     click.echo(
-        f"Searching for frames intersecting bbox:"
+        "Searching for frames intersecting bbox:"
         f" {query_bbox.left:.6f} {query_bbox.bottom:.6f}"
         f" {query_bbox.right:.6f} {query_bbox.top:.6f}"
     )
@@ -125,20 +122,38 @@ def _plot_frames(
         polys = geom.geoms if geom.geom_type == "MultiPolygon" else [geom]
         for poly in polys:
             xs, ys = poly.exterior.xy
-            ax.fill(xs, ys, alpha=0.15, facecolor=color, edgecolor=color,
-                    linewidth=1.5, transform=ccrs.PlateCarree(), zorder=3)
+            ax.fill(
+                xs,
+                ys,
+                alpha=0.15,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=1.5,
+                transform=ccrs.PlateCarree(),
+                zorder=3,
+            )
 
         centroid = geom.centroid
         ax.text(
-            centroid.x, centroid.y, str(idx),
-            ha="center", va="center",
-            fontsize=8, fontweight="bold", color="white",
+            centroid.x,
+            centroid.y,
+            str(idx),
+            ha="center",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+            color="white",
             bbox={"boxstyle": "round,pad=0.2", "fc": color, "ec": "none", "alpha": 0.8},
-            transform=ccrs.PlateCarree(), zorder=4,
+            transform=ccrs.PlateCarree(),
+            zorder=4,
         )
 
     # Legend for pass directions
-    present_dirs = set(gdf_match["passDirection"].values) if "passDirection" in gdf_match.columns else set()
+    present_dirs = (
+        set(gdf_match["passDirection"].values)
+        if "passDirection" in gdf_match.columns
+        else set()
+    )
     legend_handles = [
         mpatches.Patch(facecolor=c, edgecolor=c, alpha=0.4, label=d)
         for d, c in colors.items()
@@ -149,17 +164,34 @@ def _plot_frames(
 
     # Plot query bbox if given
     if query_bbox is not None:
-        w, s, e, n = query_bbox.left, query_bbox.bottom, query_bbox.right, query_bbox.top
+        w, s, e, n = (
+            query_bbox.left,
+            query_bbox.bottom,
+            query_bbox.right,
+            query_bbox.top,
+        )
         rect = mpatches.Rectangle(
-            (w, s), e - w, n - s,
-            linewidth=2, edgecolor="red", facecolor="none", linestyle="--",
-            transform=ccrs.PlateCarree(), zorder=5,
+            (w, s),
+            e - w,
+            n - s,
+            linewidth=2,
+            edgecolor="red",
+            facecolor="none",
+            linestyle="--",
+            transform=ccrs.PlateCarree(),
+            zorder=5,
         )
         ax.add_patch(rect)
         ax.text(
-            (w + e) / 2, n, "query",
-            fontsize=9, color="red", ha="center", va="bottom",
-            transform=ccrs.PlateCarree(), zorder=5,
+            (w + e) / 2,
+            n,
+            "query",
+            fontsize=9,
+            color="red",
+            ha="center",
+            va="bottom",
+            transform=ccrs.PlateCarree(),
+            zorder=5,
         )
 
     ax.set_title(f"NISAR Frames ({len(gdf_match)} found)")

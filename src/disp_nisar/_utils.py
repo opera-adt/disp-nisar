@@ -17,7 +17,6 @@ from dolphin.utils import full_suffix
 from dolphin.workflows.config import UnwrapOptions
 from opera_utils._cslc import _get_dset_and_attrs
 from osgeo import gdal
-from shapely import wkt
 from shapely.geometry import LinearRing, MultiPolygon, Polygon
 from tqdm.contrib.concurrent import thread_map
 
@@ -316,8 +315,11 @@ def get_nisar_frame_bbox(
     """
     if cslc_file.suffix in {".h5", ".hdf5"}:
         # Use GDAL to read the actual raster's CRS and bounds from the HDF5 dataset
-        # This ensures we get the native projection (e.g., UTM) not the bounding polygon's 4326
-        subdataset = f'NETCDF:"{cslc_file}":/science/LSAR/GSLC/grids/{frequency}/{polarization}'
+        # This ensures we get the native projection (e.g., UTM) not the
+        # bounding polygon's 4326
+        subdataset = (
+            f'NETCDF:"{cslc_file}":/science/LSAR/GSLC/grids/{frequency}/{polarization}'
+        )
         ds = gdal.Open(subdataset)
         if ds is None:
             raise ValueError(f"Could not open subdataset {subdataset}")

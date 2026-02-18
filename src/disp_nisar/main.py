@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
-
 from dolphin import PathOrStr, io, stitching
 from dolphin._log import log_runtime, setup_logging
 from dolphin.unwrap._utils import create_combined_mask
@@ -149,13 +148,9 @@ def run(
     # Filter by last processed date
     if last_processed := pge_runconfig.input_file_group.last_processed:
         logger.info(f"Filtering outputs before {last_processed}")
-        logger.info(
-            f"Before filtering: {len(out_paths.timeseries_paths)} outputs"
-        )
+        logger.info(f"Before filtering: {len(out_paths.timeseries_paths)} outputs")
         out_paths = _filter_before_last_processed(out_paths, last_processed)
-        logger.info(
-            f"After filtering: {len(out_paths.timeseries_paths)} outputs"
-        )
+        logger.info(f"After filtering: {len(out_paths.timeseries_paths)} outputs")
 
     # Read the ionosphere phase screen for timeseries from GUNW files
     out_paths.ionospheric_corrections = read_ionosphere_phase_screen(
