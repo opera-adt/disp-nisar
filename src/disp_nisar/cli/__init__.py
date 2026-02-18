@@ -3,6 +3,7 @@ import click
 from .download import download_group
 from .make_browse import make_browse
 from .run import run_cli
+from .search import search
 from .validate import validate
 
 
@@ -21,6 +22,7 @@ cli_app.add_command(run_cli)
 cli_app.add_command(validate)
 cli_app.add_command(make_browse)
 cli_app.add_command(download_group)
+cli_app.add_command(search)
 
 if __name__ == "__main__":
     cli_app()
