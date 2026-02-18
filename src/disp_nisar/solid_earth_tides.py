@@ -32,10 +32,16 @@ def resample_to_target(
     if array.shape == target_shape:
         return array
     zoom_factors = (target_shape[0] / array.shape[0], target_shape[1] / array.shape[1])
-    out = zoom(array, zoom_factors, order=1)  # Linear interpolation
     if isinstance(array, np.ma.MaskedArray):
-        mask_out = zoom(array.mask, zoom_factors, order=1).astype(bool)
-        out = np.ma.MaskedArray(data=out, mask=mask_out)
+        data_out = zoom(
+            np.asarray(array.data, dtype=np.float64), zoom_factors, order=1
+        )
+        mask_out = zoom(
+            array.mask.astype(np.float64), zoom_factors, order=1
+        ).astype(bool)
+        out = np.ma.MaskedArray(data=data_out, mask=mask_out)
+    else:
+        out = zoom(np.asarray(array, dtype=np.float64), zoom_factors, order=1)
     return out
 
 

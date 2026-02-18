@@ -314,25 +314,25 @@ def get_nisar_frame_bbox(
 
     """
     if cslc_file.suffix in {".h5", ".hdf5"}:
-        # Use GDAL to read the actual raster's CRS and bounds from the HDF5 dataset
-        # This ensures we get the native projection (e.g., UTM) not the
-        # bounding polygon's 4326
-        subdataset = (
-            f'NETCDF:"{cslc_file}":/science/LSAR/GSLC/grids/{frequency}/{polarization}'
-        )
-        ds = gdal.Open(subdataset)
-        if ds is None:
-            raise ValueError(f"Could not open subdataset {subdataset}")
+        import h5py
 
-        # Get the actual raster CRS
-        crs = io.get_raster_crs(subdataset)
-        epsg = crs.to_epsg()
-        if epsg is None:
-            raise ValueError(f"Could not determine EPSG from {subdataset}")
+        # Read CRS and bounds directly from NISAR HDF5 metadata
+        with h5py.File(cslc_file, "r") as h5f:
+            grid_group = h5f[f"science/LSAR/GSLC/grids/{frequency}"]
+            epsg = int(grid_group["projection"][()])
 
-        # Get the actual raster bounds
-        bounds = io.get_raster_bounds(subdataset)
-        ds = None
+            x_coords = grid_group["xCoordinates"][:]
+            y_coords = grid_group["yCoordinates"][:]
+            x_spacing = float(grid_group["xCoordinateSpacing"][()])
+            y_spacing = float(grid_group["yCoordinateSpacing"][()])
+
+            # Compute bounds (left, bottom, right, top)
+            bounds = (
+                float(x_coords.min()) - abs(x_spacing) / 2,
+                float(y_coords.min()) - abs(y_spacing) / 2,
+                float(x_coords.max()) + abs(x_spacing) / 2,
+                float(y_coords.max()) + abs(y_spacing) / 2,
+            )
     else:
         import h5py
 

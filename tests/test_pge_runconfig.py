@@ -112,7 +112,6 @@ def test_algorithm_parameters_defaults():
     params = AlgorithmParameters()
 
     # Check direct attributes
-    assert params.algorithm_parameters_overrides_json is None
     assert params.subdataset == "/science/LSAR/GSLC/grids/frequencyA/HH"
     assert params.recommended_temporal_coherence_threshold == 0.6
     assert params.recommended_similarity_threshold == 0.5
@@ -157,8 +156,6 @@ def test_runconfig_from_workflow(
         algorithm_parameters_file=algo_file,
     ).to_workflow()
 
-    # these will be slightly different
-    w2.creation_time_utc = w1.creation_time_utc
     assert w1 == w2
 
 
@@ -495,16 +492,14 @@ def overrides_file():
 
 def test_algorithm_overrides_hawaii(overrides_file, algorithm_parameters_file):
     orig_params = AlgorithmParameters.from_yaml(algorithm_parameters_file)
-    orig_params.algorithm_parameters_overrides_json = overrides_file
 
-    p2 = pge_runconfig._override_parameters(orig_params, 23210)  # hawaii
+    p2 = pge_runconfig._override_parameters(orig_params, overrides_file, 23210)  # hawaii
     assert p2.unwrap_options.unwrap_method == "spurt"
 
 
 def test_algorithm_overrides_empty_frame(overrides_file, algorithm_parameters_file):
     orig_params = AlgorithmParameters.from_yaml(algorithm_parameters_file)
-    orig_params.algorithm_parameters_overrides_json = overrides_file
 
     # frame id with no override
-    p4 = pge_runconfig._override_parameters(orig_params, 1234)
+    p4 = pge_runconfig._override_parameters(orig_params, overrides_file, 1234)
     assert p4.unwrap_options == orig_params.unwrap_options
