@@ -11,6 +11,10 @@ input_file_group:
   # REQUIRED: Polarization of the gslcs contained in `gslc_file_list`.
   #   Type: string.
   polarization: HH
+  # (For FORWARD mode) last processed date for the frame. If provided, the SAS will only
+  #   output products whose secondary datetime is *after* `last_processed`.
+  #   Type: string | null.
+  last_processed:
 dynamic_ancillary_file_group:
   # REQUIRED: Path to file containing SAS algorithm parameters.
   #   Type: string.
@@ -33,6 +37,13 @@ dynamic_ancillary_file_group:
   #   Type: array | null.
   troposphere_files:
 static_ancillary_file_group:
+  # JSON file containing frame-specific algorithm parameters to override the defaults passed
+  #   in the `algorithm_parameters.yaml`.
+  #   Type: string | null.
+  algorithm_parameters_overrides_json:
+  # JSON file containing the mapping from frame_id to bounds information.
+  #   Type: string | null.
+  frame_to_bounds_json:
   # JSON file containing list of reference date changes for each frame.
   #   Type: string | null.
   reference_date_database_json: static_ancillary_files/opera-disp-nisar-reference-dates-dummy.json

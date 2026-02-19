@@ -68,7 +68,10 @@ RUN micromamba install --yes --channel conda-forge -n base -f /tmp/specfile.txt 
 # Activate, otherwise python will not be found
 # https://github.com/mamba-org/micromamba-docker#running-commands-in-dockerfile-within-the-conda-environment
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
-RUN pip install git+https://github.com/isce-framework/spurt@v0.1.1
+# Pin numpy<2 to prevent spurt from upgrading it (numba requires numpy<2.1)
+RUN echo "numpy<2" > /tmp/constraints.txt && \
+    PIP_CONSTRAINT=/tmp/constraints.txt pip install git+https://github.com/isce-framework/spurt@v0.1.1 && \
+    rm /tmp/constraints.txt
 # --no-deps because they are installed with conda
 RUN pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.18.1
 RUN pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.36.2

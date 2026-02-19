@@ -3,19 +3,28 @@ from pathlib import Path
 import numpy as np
 import pytest
 from dolphin import io
+from dolphin.constants import SPEED_OF_LIGHT
 from dolphin.workflows import UnwrapOptions
 from shapely import from_wkt
 
 from disp_nisar._utils import (
     _convert_meters_to_radians,
     _create_correlation_images,
+    _frequency_to_wavelength,
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
+    get_nisar_frame_bbox,
     split_on_antimeridian,
 )
 
 DATA_DIR = Path(__file__).parent / "data"
 UNW_FILE = DATA_DIR / "20160716_20160809.unw.tif"
+_NISAR_H5_NAME = (
+    "COMPRESSED_NISAR_L2_GSLC_NI_F150"
+    "_20170610T000000Z_20170610T000000Z"
+    "_20171001T000000Z_20240429T000000Z_NI_HH_v0.1.h5"
+)
+NISAR_H5_FILE = DATA_DIR / _NISAR_H5_NAME
 
 
 @pytest.fixture
@@ -229,3 +238,28 @@ def test_dateline_crossing():
     assert (
         multipoly.area < 0.1 * polygon.area
     )  # Original failing case had area of hundreds
+
+
+def test_get_nisar_frame_bbox():
+    """Test extracting EPSG and bbox from a NISAR HDF5 file."""
+    epsg, bbox = get_nisar_frame_bbox(NISAR_H5_FILE)
+    assert epsg == 32611
+    # Check bbox has 4 elements and is reasonable (UTM coordinates)
+    assert len(bbox) == 4
+    left, bottom, right, top = bbox
+    assert left < right
+    assert bottom < top
+    # Values from the test file's xCoordinates/yCoordinates with half-pixel margin
+    assert abs(left - (337205.0 - 5.0)) < 1.0
+    assert abs(right - (347195.0 + 5.0)) < 1.0
+    assert abs(bottom - (3887002.5 - 2.5)) < 1.0
+    assert abs(top - (3891997.5 + 2.5)) < 1.0
+
+
+def test_frequency_to_wavelength():
+    """Test extracting wavelength from NISAR HDF5 center frequency."""
+    wavelength = _frequency_to_wavelength("frequencyA", NISAR_H5_FILE)
+    assert isinstance(wavelength, float)
+    # L-band center frequency ~1.27 GHz -> wavelength ~0.236 m
+    expected = SPEED_OF_LIGHT / 1269999750.0604727
+    assert abs(wavelength - expected) < 1e-6

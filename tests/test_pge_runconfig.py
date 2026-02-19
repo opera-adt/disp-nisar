@@ -112,7 +112,6 @@ def test_algorithm_parameters_defaults():
     params = AlgorithmParameters()
 
     # Check direct attributes
-    assert params.algorithm_parameters_overrides_json is None
     assert params.subdataset == "/science/LSAR/GSLC/grids/frequencyA/HH"
     assert params.recommended_temporal_coherence_threshold == 0.6
     assert params.recommended_similarity_threshold == 0.5
@@ -157,8 +156,6 @@ def test_runconfig_from_workflow(
         algorithm_parameters_file=algo_file,
     ).to_workflow()
 
-    # these will be slightly different
-    w2.creation_time_utc = w1.creation_time_utc
     assert w1 == w2
 
 
@@ -495,16 +492,72 @@ def overrides_file():
 
 def test_algorithm_overrides_hawaii(overrides_file, algorithm_parameters_file):
     orig_params = AlgorithmParameters.from_yaml(algorithm_parameters_file)
-    orig_params.algorithm_parameters_overrides_json = overrides_file
 
-    p2 = pge_runconfig._override_parameters(orig_params, 23210)  # hawaii
+    p2 = pge_runconfig._override_parameters(
+        orig_params, overrides_file, 23210
+    )  # hawaii
     assert p2.unwrap_options.unwrap_method == "spurt"
 
 
 def test_algorithm_overrides_empty_frame(overrides_file, algorithm_parameters_file):
     orig_params = AlgorithmParameters.from_yaml(algorithm_parameters_file)
-    orig_params.algorithm_parameters_overrides_json = overrides_file
 
     # frame id with no override
-    p4 = pge_runconfig._override_parameters(orig_params, 1234)
+    p4 = pge_runconfig._override_parameters(orig_params, overrides_file, 1234)
     assert p4.unwrap_options == orig_params.unwrap_options
+
+
+def test_nested_update():
+    """Test _nested_update merges dicts correctly."""
+    base = {"a": 1, "b": {"c": 2, "d": 3}}
+    updates = {"b": {"c": 99}, "e": 5}
+    result = pge_runconfig._nested_update(base, updates)
+    assert result["a"] == 1
+    assert result["b"]["c"] == 99
+    assert result["b"]["d"] == 3  # not overwritten
+    assert result["e"] == 5
+
+
+def test_create_forward_mode_network():
+    """Test forward mode network creation."""
+    net3 = pge_runconfig._create_forward_mode_network(nearest_n=3)
+    assert len(net3.indexes) == 6
+    # All indexes should be negative tuples
+    for idx_pair in net3.indexes:
+        assert len(idx_pair) == 2
+        assert idx_pair[0] < 0 and idx_pair[1] < 0
+
+    net4 = pge_runconfig._create_forward_mode_network(nearest_n=4)
+    assert len(net4.indexes) == 10
+
+
+def test_parse_algorithm_overrides(overrides_file):
+    """Test parsing algorithm overrides JSON."""
+    # Known frame should return overrides
+    result = pge_runconfig._parse_algorithm_overrides(overrides_file, 23210)
+    assert "unwrap_options" in result
+    assert result["unwrap_options"]["unwrap_method"] == "spurt"
+
+    # Unknown frame returns empty dict
+    result = pge_runconfig._parse_algorithm_overrides(overrides_file, 99999)
+    assert result == {}
+
+    # None file returns empty dict
+    result = pge_runconfig._parse_algorithm_overrides(None, 23210)
+    assert result == {}
+
+
+def test_parse_reference_date_json():
+    """Test parsing reference date JSON."""
+    ref_json = Path(__file__).parent / "data/reference-dates.json"
+    result = pge_runconfig._parse_reference_date_json(ref_json, 23210)
+    assert len(result) > 0
+    assert all(isinstance(d, datetime.datetime) for d in result)
+
+    # Missing frame returns empty list
+    result = pge_runconfig._parse_reference_date_json(ref_json, 99999)
+    assert result == []
+
+    # None file returns empty list
+    result = pge_runconfig._parse_reference_date_json(None, 23210)
+    assert result == []

@@ -1,3 +1,4 @@
+import h5py
 import isce3
 import numpy as np
 from dolphin import baseline
@@ -7,6 +8,30 @@ from opera_utils import (
     get_cslc_orbit,
 )
 from pyproj import CRS, Transformer
+
+
+def _get_look_side(h5file: Filename) -> isce3.core.LookSide:
+    """Get the look side from a NISAR GSLC HDF5 file."""
+    with h5py.File(h5file, "r") as hf:
+        # Try NISAR path first
+        for path in [
+            "/science/LSAR/identification/lookDirection",
+            "/identification/lookDirection",
+        ]:
+            if path in hf:
+                look_dir = (
+                    hf[path][()].decode()
+                    if isinstance(hf[path][()], bytes)
+                    else hf[path][()]
+                )
+                break
+        else:
+            # Default to right if not found
+            return isce3.core.LookSide.Right
+
+    if look_dir.lower() == "left":
+        return isce3.core.LookSide.Left
+    return isce3.core.LookSide.Right
 
 
 def _get_grids(x: ArrayLike, y: ArrayLike, epsg: int) -> tuple:
@@ -69,7 +94,7 @@ def compute_baselines(
 
     ellipsoid = isce3.core.Ellipsoid()
     zero_doppler = isce3.core.LUT2d()
-    side = isce3.core.LookSide.Right
+    side = _get_look_side(h5file_ref)
 
     orbit_ref = get_cslc_orbit(h5file_ref)
     orbit_sec = get_cslc_orbit(h5file_sec)

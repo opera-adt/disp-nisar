@@ -17,7 +17,6 @@ from dolphin.utils import full_suffix
 from dolphin.workflows.config import UnwrapOptions
 from opera_utils._cslc import _get_dset_and_attrs
 from osgeo import gdal
-from shapely import wkt
 from shapely.geometry import LinearRing, MultiPolygon, Polygon
 from tqdm.contrib.concurrent import thread_map
 
@@ -290,13 +289,21 @@ def _convert_meters_to_radians(
     return output_files
 
 
-def get_nisar_frame_bbox(cslc_file: Path) -> tuple[int, Bbox]:
+def get_nisar_frame_bbox(
+    cslc_file: Path,
+    frequency: str = "frequencyA",
+    polarization: str = "HH",  # noqa: ARG001
+) -> tuple[int, Bbox]:
     """Extract the EPSG code and bounding box from a NISAR CSLC file.
 
     Parameters
     ----------
     cslc_file : Path
         path to the NISAR CSLC file (.h5 or .hdf5)
+    frequency : str
+        Frequency band to use (default: "frequencyA")
+    polarization : str
+        Polarization to use (default: "HH")
 
     Returns
     -------
@@ -308,34 +315,31 @@ def get_nisar_frame_bbox(cslc_file: Path) -> tuple[int, Bbox]:
     ValueError: If required metadata is missing
 
     """
-    import h5py
+    if cslc_file.suffix in {".h5", ".hdf5"}:
+        import h5py
 
-    with h5py.File(cslc_file, "r") as src:
-        if cslc_file.suffix in {".h5", ".hdf5"}:
-            try:
-                # Extract EPSG code
-                # epsg = src["/science/LSAR/GSLC/metadata/radarGrid/projection"][()]
-                # NISAR bounding Polygon epsg is always 4326 for North America
-                epsg = 4326
+        # Read CRS and bounds directly from NISAR HDF5 metadata
+        with h5py.File(cslc_file, "r") as h5f:
+            grid_group = h5f[f"science/LSAR/GSLC/grids/{frequency}"]
+            epsg = int(grid_group["projection"][()])
 
-                # Extract and process bounding polygon
-                bounding_polygon = src["/science/LSAR/identification/boundingPolygon"][
-                    ()
-                ]
+            x_coords = grid_group["xCoordinates"][:]
+            y_coords = grid_group["yCoordinates"][:]
+            x_spacing = float(grid_group["xCoordinateSpacing"][()])
+            y_spacing = float(grid_group["yCoordinateSpacing"][()])
 
-                if isinstance(bounding_polygon, bytes):
-                    bounding_polygon = bounding_polygon.decode("utf-8")
+            # Compute bounds (left, bottom, right, top)
+            bounds = (
+                float(x_coords.min()) - abs(x_spacing) / 2,
+                float(y_coords.min()) - abs(y_spacing) / 2,
+                float(x_coords.max()) + abs(x_spacing) / 2,
+                float(y_coords.max()) + abs(y_spacing) / 2,
+            )
+    else:
+        import h5py
 
-                # Convert WKT to Polygon and get bounds
-                polygon_2d = Polygon(
-                    [(x, y) for x, y, *_ in wkt.loads(bounding_polygon).exterior.coords]
-                )
-                bounds = polygon_2d.bounds
-
-            except KeyError as e:
-                raise ValueError(f"Required metadata missing in NISAR file: {e}")
-        else:
-            # Alternative format handling
+        # Alternative format handling (non-NISAR HDF5)
+        with h5py.File(cslc_file, "r") as src:
             epsg = src["data"]["spatial_ref"][()]
             data = src["data"]
 

@@ -1,3 +1,9 @@
+"""Solid Earth Tides calculation for NISAR InSAR data.
+
+This module calculates solid earth tides corrections using pysolid,
+adapted from disp-s1 for NISAR data processing.
+"""
+
 import logging
 from datetime import date, datetime
 from typing import Literal, TypeAlias, TypeVar
@@ -26,14 +32,17 @@ def resample_to_target(
     if array.shape == target_shape:
         return array
     zoom_factors = (target_shape[0] / array.shape[0], target_shape[1] / array.shape[1])
-    out = zoom(array, zoom_factors, order=1)  # Linear interpolation
     if isinstance(array, np.ma.MaskedArray):
-        mask_out = zoom(array.mask, zoom_factors, order=1).astype(bool)
-        out = np.ma.MaskedArray(data=out, mask=mask_out)
+        data_out = zoom(np.asarray(array.data, dtype=np.float64), zoom_factors, order=1)
+        mask_out = zoom(array.mask.astype(np.float64), zoom_factors, order=1).astype(
+            bool
+        )
+        out = np.ma.MaskedArray(data=data_out, mask=mask_out)
+    else:
+        out = zoom(np.asarray(array, dtype=np.float64), zoom_factors, order=1)
     return out
 
 
-# TODO: Does this function have to be changed to read from the GUNW products?
 def calculate_solid_earth_tides_correction(
     like_filename: Filename,
     reference_start_time: DateTimeLike,
@@ -94,13 +103,22 @@ def calculate_solid_earth_tides_correction(
     from the entire array to provide a relative correction.
 
     """
-    # Load bounds, CRS, and transform from like_filename
-    with rasterio.open(like_filename) as src:
-        bounds = src.bounds
-        crs = src.crs
-        affine_transform = src.transform
-        width = src.width
-        height = src.height
+    # Load bounds, CRS, and transform from like_filename using GDAL
+    # (rasterio may not support all GDAL dtypes, e.g. Float16)
+    from osgeo import gdal, osr
+
+    ds = gdal.Open(str(like_filename))
+    if ds is None:
+        msg = f"Could not open {like_filename}"
+        raise FileNotFoundError(msg)
+    gt = ds.GetGeoTransform()
+    width = ds.RasterXSize
+    height = ds.RasterYSize
+    affine_transform = Affine.from_gdal(*gt)
+    srs = osr.SpatialReference(wkt=ds.GetProjection())
+    crs = CRS.from_wkt(srs.ExportToWkt())
+    bounds = rasterio.transform.array_bounds(height, width, affine_transform)
+    ds = None
 
     # Transform bounds to EPSG:4326
     if not crs.is_geographic:
