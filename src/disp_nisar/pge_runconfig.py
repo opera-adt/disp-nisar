@@ -8,6 +8,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, List, Literal, Optional, Union
 
+from dolphin._types import Bbox
 from dolphin.stack import CompressedSlcPlan
 from dolphin.workflows.config import (
     CorrectionOptions,
@@ -350,30 +351,38 @@ class RunConfig(YamlModel):
         param_dict = algo_params.model_dump()
 
         # Convert the frame_id into an output bounding box
-        # TODO: need to modify this function for NISAR
-        # Following commented should work, but the test data is
-        # currently ALOS. not sure if it does. we need to uncomment it for NISAR.
-        # frame_to_bounds_file = self.static_ancillary_file_group.frame_to_bounds_json
-        # bounds_epsg, bounds = get_frame_bbox(
-        #     frame_id=frame_id, json_file=frame_to_burst_file
-        # )
-        bounds_epsg, bounds = get_nisar_frame_bbox(
+        frame_to_bounds_file = self.static_ancillary_file_group.frame_to_bounds_json
+        bounds_epsg, bounds = _get_frame_bbox(frame_to_bounds_file, frame_id)
+
+        # TODO: if the frame id is given in config, check for consistency of data
+        # and the given frame id by reading frame id from the GSLCs
+        # Right now, there is only frame bounds information in the json file
+        # If we add modes or polarization, then that could be checked in this section
+        # as well
+
+        bounds_epsg_gslc, bounds_gslc = get_nisar_frame_bbox(
             self.input_file_group.gslc_file_list[0],
             frequency=frequency,
             polarization=polarization,
         )
-
-        # TODO: if the frame id is given in config, check for consistency of data
-        # and the given frame id by reading frame id from the GSLCs
-
-        # Check for consistency of frame and burst ids
-        # frame_burst_ids = set(
-        #     get_burst_ids_for_frame(frame_id=frame_id, json_file=frame_to_burst_file)
-        # )
-        # data_burst_ids = set(group_by_burst(gslc_file_list).keys())
-        # mismatched_bursts = data_burst_ids - frame_burst_ids
-        # if mismatched_bursts:
-        #     raise ValueError("The GSLC data and frame id do not match")
+        if bounds_epsg_gslc != bounds_epsg:
+            raise ValueError(
+                f"EPSG mismatch: GSLC has {bounds_epsg_gslc}, but frame"
+                f" {frame_id} expects {bounds_epsg}"
+            )
+        # Allow a tolerance for bounds comparison, since GSLC bounds are
+        # derived from pixel coordinates/spacing and may not match exactly.
+        atol = 1000  # meters
+        if (
+            bounds_gslc.left < bounds.left - atol
+            or bounds_gslc.bottom < bounds.bottom - atol
+            or bounds_gslc.right > bounds.right + atol
+            or bounds_gslc.top > bounds.top + atol
+        ):
+            raise ValueError(
+                f"Bounds mismatch: GSLC bounds {bounds_gslc} fall outside"
+                f" frame {frame_id} bounds {bounds} (tolerance={atol}m)"
+            )
 
         # Setup the OPERA-specific options to adjust from dolphin's defaults
         input_options = {
@@ -599,6 +608,23 @@ def _parse_reference_date_json(
     else:
         reference_datetimes = []
     return reference_datetimes
+
+
+def _get_frame_bbox(
+    frame_to_bounds_json: Path | str, frame_id: int | str
+) -> tuple[int, Bbox]:
+    """Look up the EPSG and bounding box for a frame from the frame-to-bounds JSON."""
+    with open(frame_to_bounds_json) as f:
+        frame_data = json.load(f)
+    if "data" in frame_data:
+        frame_data = frame_data["data"]
+    key = str(frame_id)
+    if key not in frame_data:
+        raise ValueError(f"Frame {frame_id} not found in {frame_to_bounds_json}")
+    entry = frame_data[key]
+    epsg = int(entry["epsg"])
+    bounds = Bbox(entry["xmin"], entry["ymin"], entry["xmax"], entry["ymax"])
+    return epsg, bounds
 
 
 def _parse_algorithm_overrides(
