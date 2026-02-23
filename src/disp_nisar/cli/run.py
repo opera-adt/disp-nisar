@@ -21,7 +21,8 @@ def run_main(config_file: str, debug: bool = False) -> None:
 def _disable_gpu_early(config_file: str) -> None:
     """Set CUDA_VISIBLE_DEVICES before JAX is imported if gpu_enabled is false."""
     import os
-    import yaml
+
+    import yaml  # type: ignore[import-untyped]
 
     with open(config_file) as f:
         raw = yaml.safe_load(f)
