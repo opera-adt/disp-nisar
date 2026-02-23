@@ -29,6 +29,7 @@ def _disable_gpu_early(config_file: str) -> None:
     gpu_enabled = (raw.get("worker_settings") or {}).get("gpu_enabled", False)
     if not gpu_enabled:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        os.environ["JAX_PLATFORMS"] = "cpu"
 
 
 @click.command("run")
