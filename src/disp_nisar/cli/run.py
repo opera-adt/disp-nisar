@@ -30,6 +30,11 @@ def _disable_gpu_early(config_file: str) -> None:
     if not gpu_enabled:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         os.environ["JAX_PLATFORMS"] = "cpu"
+        # Suppress the CUDA plugin discovery error that JAX logs
+        # even when CPU-only mode is requested
+        import logging
+
+        logging.getLogger("jax._src.xla_bridge").setLevel(logging.CRITICAL)
 
 
 @click.command("run")
