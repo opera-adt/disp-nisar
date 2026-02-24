@@ -163,7 +163,6 @@ def run(
         out_paths.timeseries_paths,
         frequency=pge_runconfig.input_file_group.frequency,
         polarization=pge_runconfig.input_file_group.polarization,
-        wavelength=wavelength,
     )
 
     create_products(
@@ -517,7 +516,8 @@ def process_product(
     corrections = {}
 
     if files.ionosphere is not None:
-        corrections["ionosphere"] = io.load_gdal(files.ionosphere)
+        iono_radians = io.load_gdal(files.ionosphere)
+        corrections["ionosphere"] = (wavelength / (4.0 * np.pi)) * iono_radians
     else:
         logger.warning(
             "Missing ionospheric correction for %s. Creating empty layer.",

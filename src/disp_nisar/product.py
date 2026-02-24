@@ -257,6 +257,11 @@ def create_output_product(
     else:
         disp_arr = unw_arr
 
+    # Apply ionospheric correction (in meters) before the short-wavelength filter
+    iono_arr = corrections.get("ionosphere") if corrections else None
+    if iono_arr is not None:
+        disp_arr = disp_arr - np.asarray(iono_arr, dtype=np.float32)
+
     _, x_res, _, _, _, y_res = gt
     # Average for the pixel spacing for filtering
     pixel_spacing = (abs(x_res) + abs(y_res)) / 2
@@ -518,8 +523,8 @@ def _create_corrections_group(
             long_name="Ionospheric Delay",
             data=ionosphere,
             description=(
-                "Ionospheric phase delay, for correcting excess path delay along the"
-                " radar line of sight"
+                "Ionospheric phase delay that has already been applied to correct"
+                " /displacement. Stored for reference."
             ),
             fillvalue=np.nan,
             attrs={"units": "meters"},
