@@ -20,8 +20,6 @@ def run_main(config_file: str, debug: bool = False) -> None:
 
 def _disable_gpu_early(config_file: str) -> None:
     """Set CUDA_VISIBLE_DEVICES before JAX is imported if gpu_enabled is false."""
-    import os
-
     import yaml  # type: ignore[import-untyped]
 
     with open(config_file) as f:
@@ -29,6 +27,7 @@ def _disable_gpu_early(config_file: str) -> None:
     gpu_enabled = (raw.get("worker_settings") or {}).get("gpu_enabled", False)
     if not gpu_enabled:
         from dolphin.utils import disable_gpu
+
         disable_gpu()
         # Suppress the CUDA plugin discovery error that JAX logs
         # even when CPU-only mode is requested
