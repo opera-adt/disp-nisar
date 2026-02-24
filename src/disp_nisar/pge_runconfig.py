@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, List, Literal, Optional, Union
@@ -32,8 +33,10 @@ from opera_utils import (
 from pydantic import ConfigDict, Field, field_validator
 
 from ._common import NISAR_DATASET_NAME
-from ._utils import get_nisar_frame_bbox
+from ._utils import _frequency_to_wavelength, get_nisar_frame_bbox
 from .enums import ImagingFrequency, Polarization, ProcessingMode
+
+logger = logging.getLogger(__name__)
 
 
 class InputFileGroup(YamlModel):
@@ -385,8 +388,18 @@ class RunConfig(YamlModel):
             )
 
         # Setup the OPERA-specific options to adjust from dolphin's defaults
+        try:
+            wavelength = _frequency_to_wavelength(frequency, gslc_file_list[0])
+        except (KeyError, OSError):
+            logger.warning(
+                "Could not read center frequency from %s; wavelength will not be set"
+                " and timeseries will remain in radians.",
+                gslc_file_list[0],
+            )
+            wavelength = None
         input_options = {
-            "subdataset": nisar_dataset_name
+            "subdataset": nisar_dataset_name,
+            "wavelength": wavelength,
         }  # param_dict.pop("subdataset")}
         param_dict["output_options"]["epsg"] = bounds_epsg
         param_dict["output_options"]["bounds"] = bounds
