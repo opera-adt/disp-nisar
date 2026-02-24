@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, List, Literal, Optional, Union
@@ -32,8 +33,10 @@ from opera_utils import (
 from pydantic import ConfigDict, Field, field_validator
 
 from ._common import NISAR_DATASET_NAME
-from ._utils import get_nisar_frame_bbox
+from ._utils import _frequency_to_wavelength, get_nisar_frame_bbox
 from .enums import ImagingFrequency, Polarization, ProcessingMode
+
+logger = logging.getLogger(__name__)
 
 
 class InputFileGroup(YamlModel):
@@ -117,9 +120,9 @@ class DynamicAncillaryFileGroup(YamlModel):
     )
     model_config = ConfigDict(extra="forbid")
 
-    # _check_gunw_file_glob = field_validator("gunw_files", mode="before")(
-    #     _read_file_list_or_glob
-    # )
+    _check_gunw_file_glob = field_validator("gunw_files", mode="before")(
+        _read_file_list_or_glob
+    )
 
 
 class StaticAncillaryFileGroup(YamlModel):
@@ -324,7 +327,7 @@ class RunConfig(YamlModel):
         scratch_directory = self.product_path_group.scratch_path
         mask_file = self.dynamic_ancillary_file_group.mask_file
         # geometry_files = self.dynamic_ancillary_file_group.geometry_files
-        # ionosphere_files = self.dynamic_ancillary_file_group.ionosphere_files
+        ionosphere_files = self.dynamic_ancillary_file_group.gunw_files
         # troposphere_files = self.dynamic_ancillary_file_group.troposphere_files
         dem_file = self.dynamic_ancillary_file_group.dem_file
         frame_id = self.input_file_group.frame_id
@@ -385,8 +388,18 @@ class RunConfig(YamlModel):
             )
 
         # Setup the OPERA-specific options to adjust from dolphin's defaults
+        try:
+            wavelength = _frequency_to_wavelength(frequency, gslc_file_list[0])
+        except (KeyError, OSError):
+            logger.warning(
+                "Could not read center frequency from %s; wavelength will not be set"
+                " and timeseries will remain in radians.",
+                gslc_file_list[0],
+            )
+            wavelength = None
         input_options = {
-            "subdataset": nisar_dataset_name
+            "subdataset": nisar_dataset_name,
+            "wavelength": wavelength,
         }  # param_dict.pop("subdataset")}
         param_dict["output_options"]["epsg"] = bounds_epsg
         param_dict["output_options"]["bounds"] = bounds
@@ -431,7 +444,7 @@ class RunConfig(YamlModel):
             # These ones directly translate
             worker_settings=self.worker_settings,
             correction_options=CorrectionOptions(
-                # ionosphere_files=ionosphere_files,
+                ionosphere_files=ionosphere_files,
                 # troposphere_files=troposphere_files,
                 # geometry_files=[gunw_files[0]],
                 dem_file=dem_file,
@@ -487,10 +500,9 @@ class RunConfig(YamlModel):
             dynamic_ancillary_file_group=DynamicAncillaryFileGroup(
                 algorithm_parameters_file=algorithm_parameters_file,
                 mask_file=workflow.mask_file,
-                # ionosphere_files=workflow.correction_options.ionosphere_files,
                 # troposphere_files=workflow.correction_options.troposphere_files,
                 dem_file=workflow.correction_options.dem_file,
-                gunw_files=workflow.correction_options.geometry_files,
+                gunw_files=workflow.correction_options.ionosphere_files,
             ),
             static_ancillary_file_group=StaticAncillaryFileGroup(
                 frame_to_bounds_json=frame_to_bounds_json,
