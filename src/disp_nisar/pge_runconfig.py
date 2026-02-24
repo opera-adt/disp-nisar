@@ -117,9 +117,9 @@ class DynamicAncillaryFileGroup(YamlModel):
     )
     model_config = ConfigDict(extra="forbid")
 
-    # _check_gunw_file_glob = field_validator("gunw_files", mode="before")(
-    #     _read_file_list_or_glob
-    # )
+    _check_gunw_file_glob = field_validator("gunw_files", mode="before")(
+        _read_file_list_or_glob
+    )
 
 
 class StaticAncillaryFileGroup(YamlModel):
@@ -324,7 +324,7 @@ class RunConfig(YamlModel):
         scratch_directory = self.product_path_group.scratch_path
         mask_file = self.dynamic_ancillary_file_group.mask_file
         # geometry_files = self.dynamic_ancillary_file_group.geometry_files
-        # ionosphere_files = self.dynamic_ancillary_file_group.ionosphere_files
+        ionosphere_files = self.dynamic_ancillary_file_group.gunw_files
         # troposphere_files = self.dynamic_ancillary_file_group.troposphere_files
         dem_file = self.dynamic_ancillary_file_group.dem_file
         frame_id = self.input_file_group.frame_id
@@ -431,7 +431,7 @@ class RunConfig(YamlModel):
             # These ones directly translate
             worker_settings=self.worker_settings,
             correction_options=CorrectionOptions(
-                # ionosphere_files=ionosphere_files,
+                ionosphere_files=ionosphere_files,
                 # troposphere_files=troposphere_files,
                 # geometry_files=[gunw_files[0]],
                 dem_file=dem_file,
@@ -487,10 +487,9 @@ class RunConfig(YamlModel):
             dynamic_ancillary_file_group=DynamicAncillaryFileGroup(
                 algorithm_parameters_file=algorithm_parameters_file,
                 mask_file=workflow.mask_file,
-                # ionosphere_files=workflow.correction_options.ionosphere_files,
                 # troposphere_files=workflow.correction_options.troposphere_files,
                 dem_file=workflow.correction_options.dem_file,
-                gunw_files=workflow.correction_options.geometry_files,
+                gunw_files=workflow.correction_options.ionosphere_files,
             ),
             static_ancillary_file_group=StaticAncillaryFileGroup(
                 frame_to_bounds_json=frame_to_bounds_json,

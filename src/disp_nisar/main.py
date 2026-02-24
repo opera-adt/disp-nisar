@@ -152,17 +152,18 @@ def run(
         out_paths = _filter_before_last_processed(out_paths, last_processed)
         logger.info(f"After filtering: {len(out_paths.timeseries_paths)} outputs")
 
+    # Obtain wavelength based on frequency
+    wavelength = _frequency_to_wavelength(
+        pge_runconfig.input_file_group.frequency, cfg.cslc_file_list[0]
+    )
+
     # Read the ionosphere phase screen for timeseries from GUNW files
     out_paths.ionospheric_corrections = read_ionosphere_phase_screen(
         pge_runconfig.dynamic_ancillary_file_group.gunw_files,
         out_paths.timeseries_paths,
         frequency=pge_runconfig.input_file_group.frequency,
         polarization=pge_runconfig.input_file_group.polarization,
-    )
-
-    # Obtain wavelength based on frequency
-    wavelength = _frequency_to_wavelength(
-        pge_runconfig.input_file_group.frequency, cfg.cslc_file_list[0]
+        wavelength=wavelength,
     )
 
     create_products(
