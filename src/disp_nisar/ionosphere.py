@@ -170,8 +170,8 @@ def invert_ifg_to_timeseries(
         rank = np.linalg.matrix_rank(AtA)
         if rank < num_unknowns:
             logger.warning(
-                f"Design matrix is rank-deficient (rank={rank}, expected={num_unknowns}). "
-                "Inversion may be unstable."
+                f"Design matrix is rank-deficient (rank={rank},"
+                f" expected={num_unknowns}). Inversion may be unstable."
             )
         try:
             AtA_inv = np.linalg.pinv(AtA)
@@ -320,6 +320,7 @@ def read_ionosphere_phase_screen(
         logger.warning("No valid ionosphere data found in GUNW files")
         return None
 
+    assert iono_shape is not None
     rows, cols = iono_shape
 
     # Get unique dates and build design matrix
