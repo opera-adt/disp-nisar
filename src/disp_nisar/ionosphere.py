@@ -8,10 +8,9 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import rasterio
+from dolphin import io
 from dolphin.utils import full_suffix
 from opera_utils import get_dates
-from rasterio.windows import Window
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +194,6 @@ def apply_ionosphere_corrections(
     timeseries_paths: list[Path],
     iono_correction_paths: list[Path | None],
     wavelength: float,
-    block_size: int = 512,
 ) -> None:
     """Subtract ionosphere corrections from displacement timeseries files in-place.
 
@@ -208,8 +206,6 @@ def apply_ionosphere_corrections(
         None entries are skipped.
     wavelength : float
         Radar wavelength in meters, used to convert iono phase (radians) to meters.
-    block_size : int, optional
-        Number of rows to process at a time. Default is 512.
 
     """
     phase_to_meters = wavelength / (4.0 * np.pi)
@@ -217,18 +213,18 @@ def apply_ionosphere_corrections(
         if iono_file is None:
             logger.warning("No ionosphere correction for %s, skipping", ts_file)
             continue
+        units = io.get_raster_units(ts_file)
+        disp = io.load_gdal(ts_file, masked=True).astype(np.float32)
+        iono = io.load_gdal(iono_file, masked=True).astype(np.float32)
+        corrected = np.ma.filled(disp - phase_to_meters * iono, np.nan)
         tmp_file = ts_file.with_suffix(".iono_tmp.tif")
-        with rasterio.open(ts_file) as ts_src, rasterio.open(iono_file) as iono_src:
-            profile = ts_src.profile.copy()
-            rows, cols = ts_src.height, ts_src.width
-            with rasterio.open(tmp_file, "w", **profile) as dst:
-                for row_start in range(0, rows, block_size):
-                    row_end = min(row_start + block_size, rows)
-                    window = Window(0, row_start, cols, row_end - row_start)
-                    disp_block = ts_src.read(1, window=window).astype(np.float32)
-                    iono_block = iono_src.read(1, window=window).astype(np.float32)
-                    corrected = disp_block - phase_to_meters * iono_block
-                    dst.write(corrected, 1, window=window)
+        io.write_arr(
+            arr=corrected,
+            like_filename=ts_file,
+            output_name=tmp_file,
+            nodata=np.nan,
+            units=units,
+        )
         tmp_file.replace(ts_file)
         logger.debug("Applied ionosphere correction to %s", ts_file)
 
@@ -360,59 +356,74 @@ def read_ionosphere_phase_screen(
         out_name = out_file.name.replace(full_suffix(out_file), "_ionosphere.tif")
         file_triples.append((out_file, output_dir / out_name, ts_idx))
 
-    # Create all output files up-front (correct georef, NaN-filled), keep them open
+    # Create all output files up-front (correct georef, NaN-filled) using dolphin io
     logger.info("Inverting interferogram ionosphere to timeseries block by block")
-    output_file_handles: dict[Path, rasterio.DatasetWriter] = {}
-    try:
-        for out_file, out_path, ts_idx in file_triples:
-            if ts_idx is None:
-                logger.warning(
-                    "No matching ionosphere date for %s, skipping", out_file.name
-                )
-                continue
-            with rasterio.open(out_file) as src:
-                profile = src.profile.copy()
-            profile.update(dtype="float32", count=1, nodata=np.nan)
-            output_file_handles[out_path] = rasterio.open(out_path, "w", **profile)
-
-        # Process in row-blocks: read → invert → write
-        for row_start in range(0, rows, block_size):
-            row_end = min(row_start + block_size, rows)
-            blk_rows = row_end - row_start
-            row_sl = slice(row_start, row_end)
-
-            # Read this block from every valid GUNW file
-            iono_blocks = [
-                read_ionosphere_from_gunw(gf, frequency, polarization, row_slice=row_sl)
-                for gf in valid_gunw_files
-            ]
-            ifg_block = np.stack(iono_blocks, axis=0)  # (num_ifgs, blk_rows, cols)
-
-            # Invert with precomputed AtA_inv — no matrix decomposition per block
-            ts_block = invert_ifg_to_timeseries(
-                ifg_block, design_matrix, AtA_inv=AtA_inv
+    created_out_paths: set[Path] = set()
+    for out_file, out_path, ts_idx in file_triples:
+        if ts_idx is None:
+            logger.warning(
+                "No matching ionosphere date for %s, skipping", out_file.name
             )
-            if ts_block is None:
+            continue
+        io.write_arr(
+            arr=None,
+            like_filename=out_file,
+            output_name=out_path,
+            dtype="float32",
+            nodata=np.nan,
+            units="radians",
+        )
+        created_out_paths.add(out_path)
+
+    # Process in row-blocks: read → invert → write
+    for row_start in range(0, rows, block_size):
+        row_end = min(row_start + block_size, rows)
+        blk_rows = row_end - row_start
+        row_sl = slice(row_start, row_end)
+
+        # Read this block from every valid GUNW file
+        iono_blocks = []
+        skip_block = False
+        for gf in valid_gunw_files:
+            block = read_ionosphere_from_gunw(
+                gf, frequency, polarization, row_slice=row_sl
+            )
+            if block is None:
                 logger.error(
-                    "Inversion failed for block [%d:%d], skipping", row_start, row_end
+                    "Failed to read ionosphere block rows [%d:%d] from %s,"
+                    " skipping block",
+                    row_start,
+                    row_end,
+                    gf,
                 )
+                skip_block = True
+                break
+            iono_blocks.append(block)
+        if skip_block:
+            continue
+        ifg_block = np.stack(iono_blocks, axis=0)  # (num_ifgs, blk_rows, cols)
+
+        # Invert with precomputed AtA_inv — no matrix decomposition per block
+        ts_block = invert_ifg_to_timeseries(ifg_block, design_matrix, AtA_inv=AtA_inv)
+        if ts_block is None:
+            logger.error(
+                "Inversion failed for block [%d:%d], skipping", row_start, row_end
+            )
+            continue
+
+        # Prepend zeros for the reference date → (num_dates, blk_rows, cols)
+        zeros = np.zeros((1, blk_rows, cols), dtype=ts_block.dtype)
+        ts_full_block = np.concatenate([zeros, ts_block], axis=0)
+
+        for _out_file, out_path, ts_idx in file_triples:
+            if ts_idx is None or out_path not in created_out_paths:
                 continue
-
-            # Prepend zeros for the reference date → (num_dates, blk_rows, cols)
-            zeros = np.zeros((1, blk_rows, cols), dtype=ts_block.dtype)
-            ts_full_block = np.concatenate([zeros, ts_block], axis=0)
-
-            window = Window(0, row_start, cols, blk_rows)
-            for _out_file, out_path, ts_idx in file_triples:
-                if ts_idx is None or out_path not in output_file_handles:
-                    continue
-                output_file_handles[out_path].write(
-                    ts_full_block[ts_idx], 1, window=window
-                )
-
-    finally:
-        for fh in output_file_handles.values():
-            fh.close()
+            io.write_block(
+                ts_full_block[ts_idx].astype(np.float32),
+                out_path,
+                row_start=row_start,
+                col_start=0,
+            )
 
     # Collect results preserving 1-to-1 correspondence with output_timeseries_files
     output_paths: list[Path | None] = []
@@ -432,8 +443,6 @@ def read_ionosphere_phase_screen(
 
     if wavelength is not None:
         logger.info("Applying ionosphere corrections to displacement timeseries")
-        apply_ionosphere_corrections(
-            output_timeseries_files, output_paths, wavelength, block_size=block_size
-        )
+        apply_ionosphere_corrections(output_timeseries_files, output_paths, wavelength)
 
     return valid_paths
