@@ -11,6 +11,8 @@ import numpy as np
 from dolphin import io
 from dolphin.utils import full_suffix
 from opera_utils import get_dates
+from opera_utils._utils import format_nc_filename
+from opera_utils.stitching import warp_to_match
 
 logger = logging.getLogger(__name__)
 
@@ -344,8 +346,14 @@ def read_ionosphere_phase_screen(
     output_dir = output_timeseries_files[0].parent / "ionosphere"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build (out_file, out_path, ts_idx) for every requested output date
-    file_triples: list[tuple[Path, Path, int | None]] = []
+    # Format the GUNW .h5 file as a GDAL-readable NETCDF subdataset path so that
+    # io.write_arr can copy the ionosphere layer's CRS and geotransform.
+    gunw_iono_gdal_path = format_nc_filename(valid_gunw_files[0], iono_path)
+
+    # Build (out_file, tmp_path, out_path, ts_idx) for every requested output date.
+    # tmp_path is a GeoTIFF on the GUNW grid; out_path is the final
+    # timeseries-grid file.
+    file_triples: list[tuple[Path, Path, Path, int | None]] = []
     for out_file in output_timeseries_files:
         out_dates = get_dates(out_file)
         sec_date = out_dates[1] if len(out_dates) >= 2 else out_dates[0]
@@ -354,12 +362,15 @@ def read_ionosphere_phase_screen(
             (i for i, ud in enumerate(unique_dates) if sec_date_only == ud), None
         )
         out_name = out_file.name.replace(full_suffix(out_file), "_ionosphere.tif")
-        file_triples.append((out_file, output_dir / out_name, ts_idx))
+        tmp_name = out_file.name.replace(full_suffix(out_file), "_ionosphere_gunw.tif")
+        file_triples.append(
+            (out_file, output_dir / tmp_name, output_dir / out_name, ts_idx)
+        )
 
-    # Create all output files up-front (correct georef, NaN-filled) using dolphin io
+    # Create temporary GeoTIFFs on the GUNW grid (NaN-filled, correct GUNW georef)
     logger.info("Inverting interferogram ionosphere to timeseries block by block")
-    created_out_paths: set[Path] = set()
-    for out_file, out_path, ts_idx in file_triples:
+    created_tmp_paths: set[Path] = set()
+    for out_file, tmp_path, _out_path, ts_idx in file_triples:
         if ts_idx is None:
             logger.warning(
                 "No matching ionosphere date for %s, skipping", out_file.name
@@ -367,15 +378,15 @@ def read_ionosphere_phase_screen(
             continue
         io.write_arr(
             arr=None,
-            like_filename=out_file,
-            output_name=out_path,
+            like_filename=gunw_iono_gdal_path,
+            output_name=tmp_path,
             dtype="float32",
             nodata=np.nan,
             units="radians",
         )
-        created_out_paths.add(out_path)
+        created_tmp_paths.add(tmp_path)
 
-    # Process in row-blocks: read → invert → write
+    # Process in row-blocks: read → invert → write to GUNW-grid temp files
     for row_start in range(0, rows, block_size):
         row_end = min(row_start + block_size, rows)
         blk_rows = row_end - row_start
@@ -415,19 +426,37 @@ def read_ionosphere_phase_screen(
         zeros = np.zeros((1, blk_rows, cols), dtype=ts_block.dtype)
         ts_full_block = np.concatenate([zeros, ts_block], axis=0)
 
-        for _out_file, out_path, ts_idx in file_triples:
-            if ts_idx is None or out_path not in created_out_paths:
+        for _out_file, tmp_path, _out_path, ts_idx in file_triples:
+            if ts_idx is None or tmp_path not in created_tmp_paths:
                 continue
             io.write_block(
                 ts_full_block[ts_idx].astype(np.float32),
-                out_path,
+                tmp_path,
                 row_start=row_start,
                 col_start=0,
             )
 
+    # Reproject each GUNW-grid temp file onto the timeseries grid, then remove temp
+    logger.info("Reprojecting ionosphere corrections to timeseries grid")
+    created_out_paths: set[Path] = set()
+    for out_file, tmp_path, out_path, ts_idx in file_triples:
+        if ts_idx is None or tmp_path not in created_tmp_paths:
+            continue
+        warp_to_match(
+            input_file=tmp_path,
+            match_file=out_file,
+            output_file=out_path,
+            resample_alg="bilinear",
+        )
+        tmp_path.unlink(missing_ok=True)
+        created_out_paths.add(out_path)
+        logger.debug(
+            "Reprojected ionosphere correction to timeseries grid: %s", out_path
+        )
+
     # Collect results preserving 1-to-1 correspondence with output_timeseries_files
     output_paths: list[Path | None] = []
-    for _out_file, out_path, ts_idx in file_triples:
+    for _out_file, _tmp_path, out_path, ts_idx in file_triples:
         if ts_idx is None:
             output_paths.append(None)
         else:
