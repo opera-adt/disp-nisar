@@ -11,8 +11,8 @@ import numpy as np
 from dolphin import io
 from dolphin.utils import full_suffix
 from opera_utils import get_dates
+from opera_utils._utils import format_nc_filename
 from opera_utils.stitching import warp_to_match
-from osgeo import gdal, osr
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,6 @@ GUNW_IONO_PATH_TEMPLATE = (
     "{polarization}/ionospherePhaseScreen"
 )
 GUNW_IDENTIFICATION_PATH = "/science/LSAR/identification"
-GUNW_GRID_PATH_TEMPLATE = "/science/LSAR/GUNW/grids/{frequency}"
 
 
 def get_gunw_dates(gunw_file: Path) -> tuple:
@@ -45,63 +44,6 @@ def get_gunw_dates(gunw_file: Path) -> tuple:
         ref_date = id_group["referenceZeroDopplerStartTime"][()].decode()
         sec_date = id_group["secondaryZeroDopplerStartTime"][()].decode()
     return date.fromisoformat(ref_date[:10]), date.fromisoformat(sec_date[:10])
-
-
-def _get_gunw_spatial_ref(
-    gunw_file: Path,
-    frequency: str,
-    polarization: str,
-) -> tuple[int, tuple[float, float, float, float, float, float]]:
-    """Read EPSG code and GDAL geotransform from a GUNW HDF5 grid.
-
-    Parameters
-    ----------
-    gunw_file : Path
-        Path to a GUNW HDF5 file.
-    frequency : str
-        Frequency band (e.g., "frequencyA").
-    polarization : str
-        Polarization (e.g., "HH", "VV", "HV", "VH").
-
-    Returns
-    -------
-    tuple[int, tuple]
-        (epsg, gdal_geotransform) where gdal_geotransform is
-        (x_origin, x_res, 0, y_origin, 0, -y_res) for a north-up grid.
-
-    """
-    grid_path = GUNW_IONO_PATH_TEMPLATE.format(
-        frequency=frequency, polarization=polarization
-    ).rsplit("/", 1)[0]
-    with h5py.File(gunw_file, "r") as f:
-        grid = f[grid_path]
-        epsg = int(grid["projection"][()])
-        x_spacing = float(grid["xCoordinateSpacing"][()])
-        y_spacing = float(grid["yCoordinateSpacing"][()])
-        x_coords = grid["xCoordinates"][:]
-        y_coords = grid["yCoordinates"][:]
-    # Pixel-center coords → pixel-corner origin for GDAL geotransform
-    x_origin = float(x_coords.min()) - abs(x_spacing) / 2.0
-    y_origin = float(y_coords.max()) + abs(y_spacing) / 2.0
-    gt = (x_origin, abs(x_spacing), 0.0, y_origin, 0.0, -abs(y_spacing))
-    return epsg, gt
-
-
-def _create_gunw_grid_tif(
-    path: Path, rows: int, cols: int, epsg: int, gt: tuple
-) -> None:
-    """Create a NaN-filled float32 GeoTIFF on the GUNW spatial grid."""
-    driver = gdal.GetDriverByName("GTiff")
-    ds = driver.Create(str(path), cols, rows, 1, gdal.GDT_Float32)
-    ds.SetGeoTransform(gt)
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(epsg)
-    ds.SetProjection(srs.ExportToWkt())
-    band = ds.GetRasterBand(1)
-    band.SetNoDataValue(float("nan"))
-    band.Fill(float("nan"))
-    ds.FlushCache()
-    ds = None
 
 
 def read_ionosphere_from_gunw(
@@ -404,10 +346,9 @@ def read_ionosphere_phase_screen(
     output_dir = output_timeseries_files[0].parent / "ionosphere"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Read the GUNW spatial reference once — used to georeference intermediate files
-    gunw_epsg, gunw_gt = _get_gunw_spatial_ref(
-        valid_gunw_files[0], frequency, polarization
-    )
+    # Format the GUNW .h5 file as a GDAL-readable NETCDF subdataset path so that
+    # io.write_arr can copy the ionosphere layer's CRS and geotransform.
+    gunw_iono_gdal_path = format_nc_filename(valid_gunw_files[0], iono_path)
 
     # Build (out_file, tmp_path, out_path, ts_idx) for every requested output date.
     # tmp_path is a GeoTIFF on the GUNW grid; out_path is the final
@@ -435,7 +376,14 @@ def read_ionosphere_phase_screen(
                 "No matching ionosphere date for %s, skipping", out_file.name
             )
             continue
-        _create_gunw_grid_tif(tmp_path, rows, cols, gunw_epsg, gunw_gt)
+        io.write_arr(
+            arr=None,
+            like_filename=gunw_iono_gdal_path,
+            output_name=tmp_path,
+            dtype="float32",
+            nodata=np.nan,
+            units="radians",
+        )
         created_tmp_paths.add(tmp_path)
 
     # Process in row-blocks: read → invert → write to GUNW-grid temp files
