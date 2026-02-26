@@ -11,6 +11,8 @@ import numpy as np
 from dolphin import io
 from dolphin.utils import full_suffix
 from opera_utils import get_dates
+from opera_utils.stitching import warp_to_match
+from osgeo import gdal, osr
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,7 @@ GUNW_IONO_PATH_TEMPLATE = (
     "{polarization}/ionospherePhaseScreen"
 )
 GUNW_IDENTIFICATION_PATH = "/science/LSAR/identification"
+GUNW_GRID_PATH_TEMPLATE = "/science/LSAR/GUNW/grids/{frequency}"
 
 
 def get_gunw_dates(gunw_file: Path) -> tuple:
@@ -42,6 +45,63 @@ def get_gunw_dates(gunw_file: Path) -> tuple:
         ref_date = id_group["referenceZeroDopplerStartTime"][()].decode()
         sec_date = id_group["secondaryZeroDopplerStartTime"][()].decode()
     return date.fromisoformat(ref_date[:10]), date.fromisoformat(sec_date[:10])
+
+
+def _get_gunw_spatial_ref(
+    gunw_file: Path,
+    frequency: str,
+    polarization: str,
+) -> tuple[int, tuple[float, float, float, float, float, float]]:
+    """Read EPSG code and GDAL geotransform from a GUNW HDF5 grid.
+
+    Parameters
+    ----------
+    gunw_file : Path
+        Path to a GUNW HDF5 file.
+    frequency : str
+        Frequency band (e.g., "frequencyA").
+    polarization : str
+        Polarization (e.g., "HH", "VV", "HV", "VH").
+
+    Returns
+    -------
+    tuple[int, tuple]
+        (epsg, gdal_geotransform) where gdal_geotransform is
+        (x_origin, x_res, 0, y_origin, 0, -y_res) for a north-up grid.
+
+    """
+    grid_path = GUNW_IONO_PATH_TEMPLATE.format(
+        frequency=frequency, polarization=polarization
+    ).rsplit("/", 1)[0]
+    with h5py.File(gunw_file, "r") as f:
+        grid = f[grid_path]
+        epsg = int(grid["projection"][()])
+        x_spacing = float(grid["xCoordinateSpacing"][()])
+        y_spacing = float(grid["yCoordinateSpacing"][()])
+        x_coords = grid["xCoordinates"][:]
+        y_coords = grid["yCoordinates"][:]
+    # Pixel-center coords → pixel-corner origin for GDAL geotransform
+    x_origin = float(x_coords.min()) - abs(x_spacing) / 2.0
+    y_origin = float(y_coords.max()) + abs(y_spacing) / 2.0
+    gt = (x_origin, abs(x_spacing), 0.0, y_origin, 0.0, -abs(y_spacing))
+    return epsg, gt
+
+
+def _create_gunw_grid_tif(
+    path: Path, rows: int, cols: int, epsg: int, gt: tuple
+) -> None:
+    """Create a NaN-filled float32 GeoTIFF on the GUNW spatial grid."""
+    driver = gdal.GetDriverByName("GTiff")
+    ds = driver.Create(str(path), cols, rows, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform(gt)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(epsg)
+    ds.SetProjection(srs.ExportToWkt())
+    band = ds.GetRasterBand(1)
+    band.SetNoDataValue(float("nan"))
+    band.Fill(float("nan"))
+    ds.FlushCache()
+    ds = None
 
 
 def read_ionosphere_from_gunw(
@@ -344,8 +404,15 @@ def read_ionosphere_phase_screen(
     output_dir = output_timeseries_files[0].parent / "ionosphere"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build (out_file, out_path, ts_idx) for every requested output date
-    file_triples: list[tuple[Path, Path, int | None]] = []
+    # Read the GUNW spatial reference once — used to georeference intermediate files
+    gunw_epsg, gunw_gt = _get_gunw_spatial_ref(
+        valid_gunw_files[0], frequency, polarization
+    )
+
+    # Build (out_file, tmp_path, out_path, ts_idx) for every requested output date.
+    # tmp_path is a GeoTIFF on the GUNW grid; out_path is the final
+    # timeseries-grid file.
+    file_triples: list[tuple[Path, Path, Path, int | None]] = []
     for out_file in output_timeseries_files:
         out_dates = get_dates(out_file)
         sec_date = out_dates[1] if len(out_dates) >= 2 else out_dates[0]
@@ -354,28 +421,24 @@ def read_ionosphere_phase_screen(
             (i for i, ud in enumerate(unique_dates) if sec_date_only == ud), None
         )
         out_name = out_file.name.replace(full_suffix(out_file), "_ionosphere.tif")
-        file_triples.append((out_file, output_dir / out_name, ts_idx))
+        tmp_name = out_file.name.replace(full_suffix(out_file), "_ionosphere_gunw.tif")
+        file_triples.append(
+            (out_file, output_dir / tmp_name, output_dir / out_name, ts_idx)
+        )
 
-    # Create all output files up-front (correct georef, NaN-filled) using dolphin io
+    # Create temporary GeoTIFFs on the GUNW grid (NaN-filled, correct GUNW georef)
     logger.info("Inverting interferogram ionosphere to timeseries block by block")
-    created_out_paths: set[Path] = set()
-    for out_file, out_path, ts_idx in file_triples:
+    created_tmp_paths: set[Path] = set()
+    for out_file, tmp_path, _out_path, ts_idx in file_triples:
         if ts_idx is None:
             logger.warning(
                 "No matching ionosphere date for %s, skipping", out_file.name
             )
             continue
-        io.write_arr(
-            arr=None,
-            like_filename=out_file,
-            output_name=out_path,
-            dtype="float32",
-            nodata=np.nan,
-            units="radians",
-        )
-        created_out_paths.add(out_path)
+        _create_gunw_grid_tif(tmp_path, rows, cols, gunw_epsg, gunw_gt)
+        created_tmp_paths.add(tmp_path)
 
-    # Process in row-blocks: read → invert → write
+    # Process in row-blocks: read → invert → write to GUNW-grid temp files
     for row_start in range(0, rows, block_size):
         row_end = min(row_start + block_size, rows)
         blk_rows = row_end - row_start
@@ -415,19 +478,37 @@ def read_ionosphere_phase_screen(
         zeros = np.zeros((1, blk_rows, cols), dtype=ts_block.dtype)
         ts_full_block = np.concatenate([zeros, ts_block], axis=0)
 
-        for _out_file, out_path, ts_idx in file_triples:
-            if ts_idx is None or out_path not in created_out_paths:
+        for _out_file, tmp_path, _out_path, ts_idx in file_triples:
+            if ts_idx is None or tmp_path not in created_tmp_paths:
                 continue
             io.write_block(
                 ts_full_block[ts_idx].astype(np.float32),
-                out_path,
+                tmp_path,
                 row_start=row_start,
                 col_start=0,
             )
 
+    # Reproject each GUNW-grid temp file onto the timeseries grid, then remove temp
+    logger.info("Reprojecting ionosphere corrections to timeseries grid")
+    created_out_paths: set[Path] = set()
+    for out_file, tmp_path, out_path, ts_idx in file_triples:
+        if ts_idx is None or tmp_path not in created_tmp_paths:
+            continue
+        warp_to_match(
+            input_file=tmp_path,
+            match_file=out_file,
+            output_file=out_path,
+            resample_alg="bilinear",
+        )
+        tmp_path.unlink(missing_ok=True)
+        created_out_paths.add(out_path)
+        logger.debug(
+            "Reprojected ionosphere correction to timeseries grid: %s", out_path
+        )
+
     # Collect results preserving 1-to-1 correspondence with output_timeseries_files
     output_paths: list[Path | None] = []
-    for _out_file, out_path, ts_idx in file_triples:
+    for _out_file, _tmp_path, out_path, ts_idx in file_triples:
         if ts_idx is None:
             output_paths.append(None)
         else:
