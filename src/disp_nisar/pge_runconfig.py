@@ -27,9 +27,9 @@ from dolphin.workflows.config._common import _read_file_list_or_glob
 from opera_utils import (
     PathOrStr,
     get_dates,
-    # OPERA_DATASET_NAME,
     sort_files_by_date,
 )
+from opera_utils.datasets import fetch_nisar_frame_to_bounds_file
 from pydantic import ConfigDict, Field, field_validator
 
 from ._common import NISAR_DATASET_NAME
@@ -102,8 +102,7 @@ class DynamicAncillaryFileGroup(YamlModel):
         ),
     )
     # Geocoded unwrapped files for ionosphere correction, SET and static geometry layers
-    gunw_files: Optional[List[Path]] = Field(
-        default=None,
+    gunw_files: List[Path] = Field(
         description=(
             "List of paths to GUNW files for ionosphere, SET and static geometry layers"
         ),
@@ -623,9 +622,11 @@ def _parse_reference_date_json(
 
 
 def _get_frame_bbox(
-    frame_to_bounds_json: Path | str, frame_id: int | str
+    frame_to_bounds_json: Path | str | None, frame_id: int | str
 ) -> tuple[int, Bbox]:
     """Look up the EPSG and bounding box for a frame from the frame-to-bounds JSON."""
+    if frame_to_bounds_json is None:
+        frame_to_bounds_json = fetch_nisar_frame_to_bounds_file()
     with open(frame_to_bounds_json) as f:
         frame_data = json.load(f)
     if "data" in frame_data:
