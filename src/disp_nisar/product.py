@@ -1545,7 +1545,7 @@ def _create_dataset(
         options = {}
         # This is a string, so we need to convert it to bytes or it will fail
         data = np.bytes_(data)
-    elif np.array(data).size <= 1:
+    elif np.asarray(data).size <= 1:
         # Scalars don't need chunks/compression
         options = {}
     dset = group.create_variable(
