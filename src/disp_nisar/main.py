@@ -517,7 +517,8 @@ def process_product(
 
     if files.ionosphere is not None:
         iono_radians = io.load_gdal(files.ionosphere)
-        corrections["ionosphere"] = (wavelength / (4.0 * np.pi)) * iono_radians
+        iono_radians *= wavelength / (4.0 * np.pi)
+        corrections["ionosphere"] = iono_radians
     else:
         logger.warning(
             "Missing ionospheric correction for %s. Creating empty layer.",

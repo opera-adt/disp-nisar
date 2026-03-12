@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import gc
 import logging
 import subprocess
 from collections.abc import Iterable, Mapping
@@ -246,21 +247,25 @@ def create_output_product(
     # Load and process unwrapped phase data, needs more custom masking
     unw_arr_ma = io.load_gdal(unw_filename, masked=True)
     unw_arr = np.ma.filled(unw_arr_ma, 0)
+    del unw_arr_ma
+    gc.collect()
     mask = unw_arr == 0
 
     input_units = io.get_raster_units(unw_filename)
     if not input_units or input_units not in ("meters", "radians"):
         logger.warning(f"Unknown units for {unw_filename}: assuming radians")
-        disp_arr = unw_arr * phase2disp
+        unw_arr *= phase2disp
+        disp_arr = unw_arr
     elif input_units == "radians":
-        disp_arr = unw_arr * phase2disp
+        unw_arr *= phase2disp
+        disp_arr = unw_arr
     else:
         disp_arr = unw_arr
 
     # Apply ionospheric correction (in meters) before the short-wavelength filter
     iono_arr = corrections.get("ionosphere") if corrections else None
     if iono_arr is not None:
-        disp_arr = disp_arr - np.asarray(iono_arr, dtype=np.float32)
+        disp_arr -= np.asarray(iono_arr, dtype=np.float32)
 
     _, x_res, _, _, _, y_res = gt
     # Average for the pixel spacing for filtering
@@ -288,19 +293,24 @@ def create_output_product(
 
     # Mark pixels that are bad
     is_zero_conncomp = conncomps == 0
+    del conncomps
     bad_temporal_coherence = (
         temporal_coherence
         < algorithm_parameters.recommended_temporal_coherence_threshold
     )
+    del temporal_coherence
     bad_similarity = similarity < algorithm_parameters.recommended_similarity_threshold
+    del similarity
     is_low_quality = bad_temporal_coherence & bad_similarity
+    del bad_temporal_coherence, bad_similarity
 
     # If a pixel has any of the reasons to be bad, recommend masking
     bad_pixel_mask = is_water | is_zero_conncomp | is_low_quality
     # Note: An alternate way to view this:
     # good_conncomp & is_no_water & (good_temporal_coherence | good_similarity)
+    del is_water, is_zero_conncomp, is_low_quality
     recommended_mask = np.logical_not(bad_pixel_mask)
-    del temporal_coherence, conncomps, similarity
+    gc.collect()
 
     # Add the current threshold to the product attributes
     DISPLACEMENT_PRODUCTS.recommended_mask.attrs |= {
@@ -347,17 +357,31 @@ def create_output_product(
             long_name="Time corresponding to beginning of reference acquisition",
             variable_name="reference_time",
         )
-        for info, data in zip(product_infos[:2], [disp_arr, filtered_disp_arr]):
-            round_mantissa(data, keep_bits=info.keep_bits)
-            _create_geo_dataset(
-                group=f,
-                name=info.name,
-                data=data,
-                long_name=info.long_name,
-                description=info.description,
-                fillvalue=info.fillvalue,
-                attrs=info.attrs,
-            )
+        info = product_infos[0]
+        round_mantissa(disp_arr, keep_bits=info.keep_bits)
+        _create_geo_dataset(
+            group=f,
+            name=info.name,
+            data=disp_arr,
+            long_name=info.long_name,
+            description=info.description,
+            fillvalue=info.fillvalue,
+            attrs=info.attrs,
+        )
+        del disp_arr
+        gc.collect()
+
+        info = product_infos[1]
+        round_mantissa(filtered_disp_arr, keep_bits=info.keep_bits)
+        _create_geo_dataset(
+            group=f,
+            name=info.name,
+            data=filtered_disp_arr,
+            long_name=info.long_name,
+            description=info.description,
+            fillvalue=info.fillvalue,
+            attrs=info.attrs,
+        )
 
         make_browse_image_from_arr(
             output_filename=Path(output_name).with_suffix(
@@ -368,8 +392,8 @@ def create_output_product(
             vmin=algorithm_parameters.browse_image_vmin_vmax[0],
             vmax=algorithm_parameters.browse_image_vmin_vmax[1],
         )
-        del disp_arr
         del filtered_disp_arr
+        gc.collect()
 
         # Add the recommended mask, which is already loaded
         info = product_infos[2]
