@@ -414,8 +414,11 @@ def create_output_product(
                     fillvalue=info.fillvalue,
                     **HDF5_OPTS,
                 )
-                _attrs = {**(info.attrs or {}), "description": info.description,
-                          "grid_mapping": GRID_MAPPING_DSET}
+                _attrs = {
+                    **(info.attrs or {}),
+                    "description": info.description,
+                    "grid_mapping": GRID_MAPPING_DSET,
+                }
                 if info.long_name:
                     _attrs["long_name"] = info.long_name
                 var.attrs.update(_attrs)
@@ -438,9 +441,9 @@ def create_output_product(
         for info, filename in blockwise_writes:
             dset = hf[f"/{info.name}"]
             for row_slice, _ in io.iter_blocks(shape, block_shape=(512, xsize)):
-                block = io.load_gdal(
-                    filename, rows=row_slice, masked=True
-                ).filled(info.fillvalue)
+                block = io.load_gdal(filename, rows=row_slice, masked=True).filled(
+                    info.fillvalue
+                )
                 block = block.astype(info.dtype)
                 if info.keep_bits is not None:
                     round_mantissa(block, keep_bits=info.keep_bits)
@@ -585,7 +588,9 @@ def _create_corrections_group(
             time=secondary_start_time,
             long_name="Time corresponding to beginning of secondary image",
         )
-        ionosphere = corrections["ionosphere"] if "ionosphere" in corrections else _zeros()
+        ionosphere = (
+            corrections["ionosphere"] if "ionosphere" in corrections else _zeros()
+        )
         _create_geo_dataset(
             group=corrections_group,
             name="ionospheric_delay",
@@ -598,7 +603,9 @@ def _create_corrections_group(
             fillvalue=np.nan,
             attrs={"units": "meters"},
         )
-        solid_earth = corrections["solid_earth"] if "solid_earth" in corrections else _zeros()
+        solid_earth = (
+            corrections["solid_earth"] if "solid_earth" in corrections else _zeros()
+        )
         _create_geo_dataset(
             group=corrections_group,
             name="solid_earth_tide",
@@ -1844,13 +1851,11 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
     with h5py.File(outname, "a") as hf:
         slc_dset = hf[slc_dset_path]
         disp_dset = hf[disp_dset_path]
-        for row_slice, _col_slice in io.iter_blocks(
-            shape, block_shape=(512, xsize)
-        ):
+        for row_slice, _col_slice in io.iter_blocks(shape, block_shape=(512, xsize)):
             # Band 1: complex SLC; COMPASS used `truncate_mantissa` default, 10 bits
-            slc_block = io.load_gdal(
-                comp_slc_file, band=1, rows=row_slice
-            ).astype(np.complex64)
+            slc_block = io.load_gdal(comp_slc_file, band=1, rows=row_slice).astype(
+                np.complex64
+            )
             round_mantissa(slc_block, keep_bits=10)
             slc_dset[row_slice, :] = slc_block
 
