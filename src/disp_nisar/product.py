@@ -209,32 +209,6 @@ def create_output_product(
 
     phase2disp = -1 * float(radar_wavelength) / (4.0 * np.pi)
 
-    y, x = _create_yx_arrays(gt=gt, shape=shape)
-    # TODO: do we need all corrections/smaller grids to be same subsample factor?
-    subsample = 50
-    y, x = y[::subsample], x[::subsample]
-    try:
-        logger.info("Calculating perpendicular baselines subsampled by %s", subsample)
-        baseline_arr = compute_baselines(
-            reference_start_file,
-            secondary_start,
-            x=x,
-            y=y,
-            epsg=crs.to_epsg(),
-            wavelength=radar_wavelength,
-            height=0,
-        )
-    except Exception:
-        logger.error(
-            f"Failed to compute baselines for {reference_start_file},"
-            f" {secondary_start}",
-            exc_info=True,
-        )
-        baseline_arr = np.zeros((100, 100))
-    corrections["baseline"] = _interpolate_data(baseline_arr, shape=shape).astype(
-        "float32"
-    )
-
     logger.info("Extracting data footprint")
     try:
         footprint_wkt = extract_footprint(raster_path=unw_filename)
@@ -265,7 +239,12 @@ def create_output_product(
     # Apply ionospheric correction (in meters) before the short-wavelength filter
     iono_arr = corrections.get("ionosphere") if corrections else None
     if iono_arr is not None:
-        disp_arr -= np.asarray(iono_arr, dtype=np.float32)
+        iono_arr = np.asarray(iono_arr, dtype=np.float32)
+        if reference_point is not None:
+            iono_arr -= iono_arr[reference_point.row, reference_point.col]
+        disp_arr -= iono_arr
+        del iono_arr
+        gc.collect()
 
     _, x_res, _, _, _, y_res = gt
     # Average for the pixel spacing for filtering
@@ -284,6 +263,7 @@ def create_output_product(
     if water_mask_filename:
         water_mask_data = io.load_gdal(water_mask_filename, masked=True).filled(0)
         is_water = water_mask_data == 0
+        del water_mask_data
     else:
         # Not provided: Don't indicate anything is water in this mask.
         is_water = np.zeros(temporal_coherence.shape, dtype=bool)
@@ -335,8 +315,11 @@ def create_output_product(
 
     disp_arr[mask] = np.nan
     num_nodata_pixels = np.sum(mask)
+    del mask
     # Be more aggressive with the short wavelength displacement mask:
     filtered_disp_arr[bad_pixel_mask] = np.nan
+    del bad_pixel_mask
+    gc.collect()
 
     product_infos: list[ProductInfo] = list(DISPLACEMENT_PRODUCTS)
 
@@ -407,7 +390,8 @@ def create_output_product(
             attrs=info.attrs,
         )
 
-        # For the others, load and save each individually
+        # For the others, create empty datasets here; filled blockwise below
+        # to avoid loading the full (multi-GiB) rasters into memory at once.
         data_files = [
             conncomp_filename,
             temp_coh_filename,
@@ -419,25 +403,78 @@ def create_output_product(
             timeseries_residual_filename,
         ]
 
+        blockwise_writes: list[tuple[Any, Path]] = []
         for info, filename in zip(product_infos[3:], data_files, strict=True):
             if filename is not None and Path(filename).exists():
-                data = io.load_gdal(filename, masked=True).filled(info.fillvalue)
-                data = data.astype(info.dtype)
+                # Create empty variable structure; data filled blockwise after context
+                var = f.create_variable(
+                    info.name,
+                    dimensions=["y", "x"],
+                    dtype=info.dtype,
+                    fillvalue=info.fillvalue,
+                    **HDF5_OPTS,
+                )
+                _attrs = {**(info.attrs or {}), "description": info.description,
+                          "grid_mapping": GRID_MAPPING_DSET}
+                if info.long_name:
+                    _attrs["long_name"] = info.long_name
+                var.attrs.update(_attrs)
+                blockwise_writes.append((info, Path(filename)))
             else:
                 data = np.full(shape=shape, fill_value=info.fillvalue, dtype=info.dtype)
+                _create_geo_dataset(
+                    group=f,
+                    name=info.name,
+                    data=data,
+                    description=info.description,
+                    long_name=info.long_name,
+                    fillvalue=info.fillvalue,
+                    attrs=info.attrs,
+                )
 
-            if info.keep_bits is not None:
-                round_mantissa(data, keep_bits=info.keep_bits)
+    # Fill ancillary datasets one strip at a time to avoid multi-GiB allocations
+    xsize = shape[1]
+    with h5py.File(output_name, "a") as hf:
+        for info, filename in blockwise_writes:
+            dset = hf[f"/{info.name}"]
+            for row_slice, _ in io.iter_blocks(shape, block_shape=(512, xsize)):
+                block = io.load_gdal(
+                    filename, rows=row_slice, masked=True
+                ).filled(info.fillvalue)
+                block = block.astype(info.dtype)
+                if info.keep_bits is not None:
+                    round_mantissa(block, keep_bits=info.keep_bits)
+                dset[row_slice, :] = block
 
-            _create_geo_dataset(
-                group=f,
-                name=info.name,
-                data=data,
-                description=info.description,
-                long_name=info.long_name,
-                fillvalue=info.fillvalue,
-                attrs=info.attrs,
-            )
+    # Compute baseline now (after displacement/mask arrays are freed) to avoid
+    # holding a full-size float32 in memory during the filtering step above.
+    y, x = _create_yx_arrays(gt=gt, shape=shape)
+    # TODO: do we need all corrections/smaller grids to be same subsample factor?
+    subsample = 50
+    y, x = y[::subsample], x[::subsample]
+    try:
+        logger.info("Calculating perpendicular baselines subsampled by %s", subsample)
+        baseline_arr = compute_baselines(
+            reference_start_file,
+            secondary_start,
+            x=x,
+            y=y,
+            epsg=crs.to_epsg(),
+            wavelength=radar_wavelength,
+            height=0,
+        )
+    except Exception:
+        logger.error(
+            f"Failed to compute baselines for {reference_start_file},"
+            f" {secondary_start}",
+            exc_info=True,
+        )
+        baseline_arr = np.zeros((100, 100))
+    del y, x
+    corrections["baseline"] = _interpolate_data(baseline_arr, shape=shape).astype(
+        "float32"
+    )
+    del baseline_arr
 
     if los_east_file is not None and los_north_file is not None:
         logger.info("Calculating solid earth tide")
@@ -529,7 +566,15 @@ def _create_corrections_group(
         corrections_group.attrs["description"] = (
             "Phase corrections which may be used to correct the displacement image"
         )
-        empty_arr = np.zeros(shape, dtype="float32")
+        # Lazy: only allocate the zeros placeholder if at least one correction
+        # is missing — avoids an unconditional ~18 GiB allocation.
+        _zeros_arr: np.ndarray | None = None
+
+        def _zeros() -> np.ndarray:
+            nonlocal _zeros_arr
+            if _zeros_arr is None:
+                _zeros_arr = np.zeros(shape, dtype="float32")
+            return _zeros_arr
 
         # TODO: Are we going to downsample these for space?
         # if so, they need they're own X/Y variables and GeoTransform
@@ -540,7 +585,7 @@ def _create_corrections_group(
             time=secondary_start_time,
             long_name="Time corresponding to beginning of secondary image",
         )
-        ionosphere = corrections.get("ionosphere", empty_arr)
+        ionosphere = corrections["ionosphere"] if "ionosphere" in corrections else _zeros()
         _create_geo_dataset(
             group=corrections_group,
             name="ionospheric_delay",
@@ -553,7 +598,7 @@ def _create_corrections_group(
             fillvalue=np.nan,
             attrs={"units": "meters"},
         )
-        solid_earth = corrections.get("solid_earth", empty_arr)
+        solid_earth = corrections["solid_earth"] if "solid_earth" in corrections else _zeros()
         _create_geo_dataset(
             group=corrections_group,
             name="solid_earth_tide",
@@ -566,7 +611,7 @@ def _create_corrections_group(
             fillvalue=np.nan,
             attrs={"units": "meters"},
         )
-        baseline = corrections.get("baseline", empty_arr)
+        baseline = corrections["baseline"] if "baseline" in corrections else _zeros()
         _create_geo_dataset(
             group=corrections_group,
             name="perpendicular_baseline",
@@ -1720,9 +1765,10 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
 
     crs = io.get_raster_crs(comp_slc_file)
     gt = io.get_raster_gt(comp_slc_file)
-    data = io.load_gdal(comp_slc_file, band=1)
-    # COMPASS used `truncate_mantissa` default, 10 bits
-    round_mantissa(data, keep_bits=10)
+
+    # Get dimensions without loading the full array into memory
+    xsize, ysize = io.get_raster_xysize(comp_slc_file)
+    shape = (ysize, xsize)
 
     # Input metadata is stored within the GDAL "DOLPHIN" domain
     metadata_dict = io.get_raster_metadata(comp_slc_file, "DOLPHIN")
@@ -1752,40 +1798,68 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
         _create_yx_dsets(
             group=data_group,
             gt=gt,
-            shape=data.shape,
+            shape=shape,
             include_time=False,
             x_name=x_name,
             y_name=y_name,
         )
-        _create_geo_dataset(
-            group=data_group,
-            name=dset_name,
-            data=data,
-            long_name="Compressed SLC",
-            description="Compressed SLC product",
-            fillvalue=np.nan + 0j,
-            attrs=attrs,
-            x_name=x_name,
-            y_name=y_name,
-            grid_mapping_dset_name=grid_mapping_dset_name,
-        )
-        del data
 
-        # Add the amplitude dispersion
-        amp_dispersion_data = io.load_gdal(comp_slc_file, band=2).real.astype("float32")
-        round_mantissa(amp_dispersion_data, keep_bits=10)
-        _create_geo_dataset(
-            group=data_group,
-            name=dispersion_dset_name,
-            data=amp_dispersion_data,
-            long_name="Amplitude Dispersion",
-            description="Amplitude dispersion for the compressed SLC files.",
-            fillvalue=np.nan,
-            attrs={"units": "unitless"},
-            x_name=x_name,
-            y_name=y_name,
-            grid_mapping_dset_name=grid_mapping_dset_name,
+        # Create empty datasets; filled blockwise below to avoid allocating
+        # the full (multi-GiB) arrays into memory at once.
+        slc_var = data_group.create_variable(
+            dset_name,
+            dimensions=[y_name, x_name],
+            dtype=np.complex64,
+            fillvalue=np.nan + 0j,
+            **HDF5_OPTS,
         )
+        slc_var.attrs.update(
+            {
+                **attrs,
+                "long_name": "Compressed SLC",
+                "description": "Compressed SLC product",
+                "grid_mapping": grid_mapping_dset_name,
+            }
+        )
+
+        disp_var = data_group.create_variable(
+            dispersion_dset_name,
+            dimensions=[y_name, x_name],
+            dtype=np.float32,
+            fillvalue=np.nan,
+            **HDF5_OPTS,
+        )
+        disp_var.attrs.update(
+            {
+                "units": "unitless",
+                "long_name": "Amplitude Dispersion",
+                "description": "Amplitude dispersion for the compressed SLC files.",
+                "grid_mapping": grid_mapping_dset_name,
+            }
+        )
+
+    # Fill both datasets one strip at a time using iter_blocks
+    slc_dset_path = f"{group_name}/{dset_name}"
+    disp_dset_path = f"{group_name}/{dispersion_dset_name}"
+    with h5py.File(outname, "a") as hf:
+        slc_dset = hf[slc_dset_path]
+        disp_dset = hf[disp_dset_path]
+        for row_slice, _col_slice in io.iter_blocks(
+            shape, block_shape=(512, xsize)
+        ):
+            # Band 1: complex SLC; COMPASS used `truncate_mantissa` default, 10 bits
+            slc_block = io.load_gdal(
+                comp_slc_file, band=1, rows=row_slice
+            ).astype(np.complex64)
+            round_mantissa(slc_block, keep_bits=10)
+            slc_dset[row_slice, :] = slc_block
+
+            # Band 2: amplitude dispersion
+            disp_block = io.load_gdal(
+                comp_slc_file, band=2, rows=row_slice
+            ).real.astype(np.float32)
+            round_mantissa(disp_block, keep_bits=10)
+            disp_dset[row_slice, :] = disp_block
 
     copy_cslc_metadata_to_compressed(opera_cslc_file, outname)
 

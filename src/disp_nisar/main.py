@@ -516,7 +516,10 @@ def process_product(
     corrections = {}
 
     if files.ionosphere is not None:
-        iono_radians = io.load_gdal(files.ionosphere)
+        warped_iono = stitching.warp_to_match(
+            files.ionosphere, files.unwrapped, resample_alg="bilinear"
+        )
+        iono_radians = io.load_gdal(warped_iono)
         iono_radians *= wavelength / (4.0 * np.pi)
         corrections["ionosphere"] = iono_radians
     else:
