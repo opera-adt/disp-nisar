@@ -430,7 +430,7 @@ def read_ionosphere_phase_screen(
             if ts_idx is None or tmp_path not in created_tmp_paths:
                 continue
             io.write_block(
-                ts_full_block[ts_idx].astype(np.float32),
+                (-ts_full_block[ts_idx]).astype(np.float32),
                 tmp_path,
                 row_start=row_start,
                 col_start=0,
