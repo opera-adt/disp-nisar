@@ -29,7 +29,34 @@ from opera_utils import (
     get_dates,
     sort_files_by_date,
 )
-from opera_utils.datasets import fetch_nisar_frame_to_bounds_file
+
+try:
+    from opera_utils.datasets import fetch_nisar_frame_to_bounds_file
+except ImportError:
+    import pooch
+
+    _NISAR_FRAME_DB_VERSION = "0.1.0"
+    _NISAR_FRAME_TO_BOUNDS_FILENAME = (
+        f"opera-nisar-disp-{_NISAR_FRAME_DB_VERSION}-frame-to-bounds.json"
+    )
+    _NISAR_POOCH = pooch.create(
+        path=pooch.os_cache("opera_utils"),
+        base_url="https://github.com/opera-adt/disp-nisar/raw/main/configs/static_ancillary_files/",
+        version=_NISAR_FRAME_DB_VERSION,
+        version_dev="main",
+        env="OPERA_UTILS_DATA_DIR",
+        registry={
+            _NISAR_FRAME_TO_BOUNDS_FILENAME: (
+                "f9f2e64f34cedadb9a35d7a792990f684f153eb5463a80d5b26982a942ea1a03"
+            ),
+        },
+    )
+
+    def fetch_nisar_frame_to_bounds_file() -> str:
+        """Get the NISAR frame-to-bounds mapping file."""
+        return _NISAR_POOCH.fetch(_NISAR_FRAME_TO_BOUNDS_FILENAME)
+
+
 from pydantic import ConfigDict, Field, field_validator
 
 from ._common import NISAR_DATASET_NAME
