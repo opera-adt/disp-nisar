@@ -27,10 +27,9 @@ dynamic_ancillary_file_group:
   #   skipped.
   #   Type: string | null.
   dem_file:
-  # List of paths to gunw files for ionosphere correction. They are interferograms and need
-  #   to cover the date range in GSLC data list. If none
-  #   provided, ionosphere corrections are skipped.
-  #   Type: array | null.
+  # REQUIRED: List of paths to GUNW files for ionosphere, SET and static geometry layers.
+  #   They are interferograms and need to cover the date range in GSLC data list.
+  #   Type: array.
   gunw_files:
   # List of paths to troposphere weather model files (1 per date). If none provided,
   #   troposphere corrections are skipped.

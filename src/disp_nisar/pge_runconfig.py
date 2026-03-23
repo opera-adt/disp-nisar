@@ -27,9 +27,36 @@ from dolphin.workflows.config._common import _read_file_list_or_glob
 from opera_utils import (
     PathOrStr,
     get_dates,
-    # OPERA_DATASET_NAME,
     sort_files_by_date,
 )
+
+try:
+    from opera_utils.datasets import fetch_nisar_frame_to_bounds_file
+except ImportError:
+    import pooch
+
+    _NISAR_FRAME_DB_VERSION = "0.1.0"
+    _NISAR_FRAME_TO_BOUNDS_FILENAME = (
+        f"opera-nisar-disp-{_NISAR_FRAME_DB_VERSION}-frame-to-bounds.json"
+    )
+    _NISAR_POOCH = pooch.create(
+        path=pooch.os_cache("opera_utils"),
+        base_url="https://github.com/opera-adt/disp-nisar/raw/main/configs/static_ancillary_files/",
+        version=_NISAR_FRAME_DB_VERSION,
+        version_dev="main",
+        env="OPERA_UTILS_DATA_DIR",
+        registry={
+            _NISAR_FRAME_TO_BOUNDS_FILENAME: (
+                "f9f2e64f34cedadb9a35d7a792990f684f153eb5463a80d5b26982a942ea1a03"
+            ),
+        },
+    )
+
+    def fetch_nisar_frame_to_bounds_file() -> str:
+        """Get the NISAR frame-to-bounds mapping file."""
+        return _NISAR_POOCH.fetch(_NISAR_FRAME_TO_BOUNDS_FILENAME)
+
+
 from pydantic import ConfigDict, Field, field_validator
 
 from ._common import NISAR_DATASET_NAME
@@ -102,8 +129,7 @@ class DynamicAncillaryFileGroup(YamlModel):
         ),
     )
     # Geocoded unwrapped files for ionosphere correction, SET and static geometry layers
-    gunw_files: Optional[List[Path]] = Field(
-        default=None,
+    gunw_files: List[Path] = Field(
         description=(
             "List of paths to GUNW files for ionosphere, SET and static geometry layers"
         ),
@@ -623,9 +649,11 @@ def _parse_reference_date_json(
 
 
 def _get_frame_bbox(
-    frame_to_bounds_json: Path | str, frame_id: int | str
+    frame_to_bounds_json: Path | str | None, frame_id: int | str
 ) -> tuple[int, Bbox]:
     """Look up the EPSG and bounding box for a frame from the frame-to-bounds JSON."""
+    if frame_to_bounds_json is None:
+        frame_to_bounds_json = fetch_nisar_frame_to_bounds_file()
     with open(frame_to_bounds_json) as f:
         frame_data = json.load(f)
     if "data" in frame_data:
