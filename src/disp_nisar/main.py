@@ -33,7 +33,7 @@ from disp_nisar._utils import (
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
 )
-from disp_nisar.ionosphere import read_ionosphere_phase_screen
+from disp_nisar.ionosphere import get_ionosphere_phase_screen
 from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
 logger = logging.getLogger(__name__)
@@ -155,9 +155,10 @@ def run(
     wavelength = _frequency_to_wavelength(
         pge_runconfig.input_file_group.frequency, cfg.cslc_file_list[0]
     )
+    # IONOSPHERE
 
     # Read the ionosphere phase screen for timeseries from GUNW files
-    out_paths.ionospheric_corrections = read_ionosphere_phase_screen(
+    out_paths.ionospheric_corrections = get_ionosphere_phase_screen(
         pge_runconfig.dynamic_ancillary_file_group.gunw_files,
         out_paths.timeseries_paths,
         frequency=pge_runconfig.input_file_group.frequency,

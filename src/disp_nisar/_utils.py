@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import shapely.ops
+import xarray as xr
 from dolphin import PathOrStr, io
 from dolphin._types import Bbox, Filename
 from dolphin.constants import SPEED_OF_LIGHT
@@ -358,3 +359,135 @@ def _frequency_to_wavelength(frequency: str, gslc_file: Filename) -> float:
     center_frequency = _get_dset_and_attrs(filename=gslc_file, dset_name=dset)[0]
     wavelength = SPEED_OF_LIGHT / center_frequency
     return wavelength
+
+
+def gslc_pixel_spacing(
+    gslc_file: Filename,
+    frequency: str = "frequencyA",
+) -> tuple[float, float]:
+    """Read pixel spacing (y, x) in metres from a GSLC HDF5 file.
+
+    Parameters
+    ----------
+    gslc_file : Filename
+        Path to a NISAR GSLC HDF5 file.
+    frequency : str
+        Frequency band group, e.g. ``"frequencyA"`` or ``"frequencyB"``.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(y_spacing, x_spacing)`` in metres, both positive.
+
+    """
+    group = f"/science/LSAR/GSLC/grids/{frequency}"
+    with xr.open_dataset(
+        gslc_file, group=group, decode_timedelta=True, phony_dims="sort"
+    ) as ds:
+        y_spacing = abs(float(ds["yCoordinateSpacing"].values))
+        x_spacing = abs(float(ds["xCoordinateSpacing"].values))
+    return y_spacing, x_spacing
+
+
+def half_window_to_resolution(
+    half_window: tuple[int, int],
+    gslc_file: Filename,
+    frequency: str = "frequencyA",
+) -> tuple[float, float]:
+    """Full window extent in metres: ``(2 * half + 1) * pixel_spacing``.
+
+    Parameters
+    ----------
+    half_window : tuple[int, int]
+        ``(half_row, half_col)`` half-window sizes in pixels.
+    gslc_file : Filename
+        Path to a NISAR GSLC HDF5 file.
+    frequency : str
+        Frequency band, e.g. ``"frequencyA"`` or ``"frequencyB"``.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(y_extent, x_extent)`` in metres.
+
+    """
+    y_spacing, x_spacing = gslc_pixel_spacing(gslc_file, frequency=frequency)
+    half_row, half_col = half_window
+    return (2 * half_row + 1) * y_spacing, (2 * half_col + 1) * x_spacing
+
+
+def strides_to_resolution(
+    strides: tuple[int, int],
+    gslc_file: Filename,
+    frequency: str = "frequencyA",
+) -> tuple[float, float]:
+    """Convert dolphin strides to output pixel spacing in metres.
+
+    Parameters
+    ----------
+    strides : tuple[int, int]
+        ``(row_stride, col_stride)`` — number of input pixels per output pixel.
+    gslc_file : Filename
+        Path to a NISAR GSLC HDF5 file.
+    frequency : str
+        Frequency band, e.g. ``"frequencyA"`` or ``"frequencyB"``.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(y_spacing, x_spacing)`` of the output grid in metres.
+
+    """
+    y_spacing, x_spacing = gslc_pixel_spacing(gslc_file, frequency=frequency)
+    row_stride, col_stride = strides
+    return row_stride * y_spacing, col_stride * x_spacing
+
+
+def phase_similarity_resolution(
+    gslc_file: Filename,
+    search_radius: int = 11,
+    frequency: str = "frequencyA",
+) -> tuple[float, float]:
+    """Resolution of the phase similarity output in metres.
+
+    Uses dolphin's sequential default ``search_radius=11``;
+    full window = ``(2 * search_radius + 1)`` pixels in each direction.
+
+    Parameters
+    ----------
+    gslc_file : Filename
+        Path to a NISAR GSLC HDF5 file.
+    search_radius : int
+        Half-size of the similarity search window.
+    frequency : str
+        Frequency band, e.g. ``"frequencyA"`` or ``"frequencyB"``.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(y_extent, x_extent)`` in metres.
+
+    """
+    y_spacing, x_spacing = gslc_pixel_spacing(gslc_file, frequency=frequency)
+    window = 2 * search_radius + 1
+    return window * y_spacing, window * x_spacing
+
+
+def max_shp_pixels(half_window: tuple[int, int]) -> int:
+    """Maximum number of SHP pixels in a half-window neighbourhood.
+
+    Full window = ``(2*half_row+1) x (2*half_col+1)``, minus the centre pixel.
+
+    Parameters
+    ----------
+    half_window : tuple[int, int]
+        ``(half_row, half_col)`` half-window sizes in pixels.
+
+    Returns
+    -------
+    int
+        Total number of neighbour pixels (excluding centre).
+
+    """
+    half_row, half_col = half_window
+    return (2 * half_row + 1) * (2 * half_col + 1) - 1

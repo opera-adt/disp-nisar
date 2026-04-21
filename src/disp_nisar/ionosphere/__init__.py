@@ -30,8 +30,8 @@ from .gslc import (
 from .gunw import (
     apply_ionosphere_corrections,
     get_gunw_dates,
+    get_ionosphere_phase_screen,
     read_ionosphere_from_gunw,
-    read_ionosphere_phase_screen,
 )
 from .inversion import build_design_matrix, invert_ifg_to_timeseries
 from .mask import (
@@ -58,7 +58,7 @@ from .utils import (
 
 __all__ = [
     # GUNW workflow
-    "read_ionosphere_phase_screen",
+    "get_ionosphere_phase_screen",
     "apply_ionosphere_corrections",
     "get_gunw_dates",
     "read_ionosphere_from_gunw",

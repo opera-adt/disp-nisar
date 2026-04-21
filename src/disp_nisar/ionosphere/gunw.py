@@ -15,6 +15,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 from dolphin import io
+from dolphin.io import round_mantissa
 from dolphin.utils import full_suffix
 from opera_utils import get_dates
 from opera_utils._utils import format_nc_filename
@@ -109,6 +110,7 @@ def _apply_one(
     ts_file: Path,
     iono_file: Path,
     suffix: str = "iono_corrected",
+    output_dir: Path | None = None,
 ) -> Path:
     """Apply ionosphere correction to a single displacement timeseries file.
 
@@ -121,19 +123,25 @@ def _apply_one(
     suffix : str, optional
         Suffix appended to the ``ts_file`` stem for the output filename.
         Default is ``"iono_corrected"``.
+    output_dir : Path, optional
+        Directory for the corrected output file.  Defaults to the same
+        directory as ``ts_file``.
 
     Returns
     -------
     Path
         Path to the output corrected raster
-        (``ts_file`` with suffix ``.{suffix}.tif``).
+        (``<output_dir>/<stem>.<suffix>.tif``).
 
     """
     units = io.get_raster_units(ts_file)
     disp = io.load_gdal(ts_file, masked=True).astype(np.float32)
     iono = io.load_gdal(iono_file, masked=True).astype(np.float32)
     corrected = np.ma.filled(disp - iono, np.nan)
-    out_file = ts_file.with_suffix(f".{suffix}.tif")
+    round_mantissa(corrected, keep_bits=12)
+    stem = ts_file.with_suffix("").name
+    out_dir = output_dir if output_dir is not None else ts_file.parent
+    out_file = out_dir / f"{stem}.{suffix}.tif"
     io.write_arr(
         arr=corrected,
         like_filename=ts_file,
@@ -148,6 +156,7 @@ def _apply_one(
 def apply_ionosphere_corrections(
     timeseries_paths: list[Path],
     iono_correction_paths: list[Path | None],
+    output_dir: Path | None = None,
     n_workers: int = 4,
 ) -> list[Path]:
     """Subtract ionosphere corrections from displacement timeseries files.
@@ -162,6 +171,9 @@ def apply_ionosphere_corrections(
     iono_correction_paths : list[Path | None]
         Paths to ionosphere correction rasters (same units as timeseries),
         one per date.  ``None`` entries are skipped.
+    output_dir : Path, optional
+        Directory for corrected output files.  Defaults to each file's own
+        directory.
     n_workers : int
         Number of parallel threads.  Default 4.
 
@@ -181,9 +193,15 @@ def apply_ionosphere_corrections(
     if skipped:
         logger.warning("Skipping %d files with no ionosphere correction", skipped)
 
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     output_paths: list[Path] = []
     with ThreadPoolExecutor(max_workers=n_workers) as exe:
-        futures = {exe.submit(_apply_one, ts, iono): ts for ts, iono in pairs}
+        futures = {
+            exe.submit(_apply_one, ts, iono, output_dir=output_dir): ts
+            for ts, iono in pairs
+        }
         for fut in futures:
             try:
                 output_paths.append(fut.result())
@@ -198,9 +216,10 @@ def apply_ionosphere_corrections(
 # ---------------------------------------------------------------------------
 
 
-def read_ionosphere_phase_screen(
+def get_ionosphere_phase_screen(
     gunw_files: list[Path] | None,
     output_timeseries_files: list[Path] | None,
+    output_dir: Path | None = None,
     frequency: str = "frequencyA",
     polarization: str = "HH",
     wavelength: float | None = None,
@@ -222,6 +241,9 @@ def read_ionosphere_phase_screen(
     output_timeseries_files : list[Path] or None
         Paths to output displacement timeseries rasters.  Files with
         ``"ionosphere"`` in their parent path are automatically excluded.
+    output_dir : Path, optional
+        Directory for ionosphere correction output files.  Defaults to an
+        ``ionosphere/`` subdirectory next to the first timeseries file.
     frequency : str
         Frequency band, e.g. ``"frequencyA"`` or ``"frequencyB"``.
     polarization : str
@@ -309,10 +331,47 @@ def read_ionosphere_phase_screen(
     unique_dates = sorted({d for pair in ifg_date_pairs for d in pair})
     logger.info("Found %d unique dates in interferogram network", len(unique_dates))
 
+    # Check that GUNW network covers all timeseries dates
+    ts_dates: set[date] = set()
+    for f in ts_files:
+        out_dates = get_dates(f)
+        sec = out_dates[1] if len(out_dates) >= 2 else out_dates[0]
+        ts_dates.add(sec.date() if hasattr(sec, "date") else sec)
+    missing_dates = ts_dates - set(unique_dates)
+    if missing_dates:
+        raise ValueError(
+            "GUNW files do not cover all timeseries dates. "
+            f"Missing: {sorted(missing_dates)}"
+        )
+
+    # Check that the interferogram network is connected (union-find)
+    parent = {d: d for d in unique_dates}
+
+    def _find(x: date) -> date:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for ref, sec in ifg_date_pairs:
+        parent[_find(ref)] = _find(sec)
+
+    roots = {_find(d) for d in unique_dates}
+    if len(roots) > 1:
+        components: dict[date, list[date]] = {}
+        for d in unique_dates:
+            components.setdefault(_find(d), []).append(d)
+        raise ValueError(
+            f"Interferogram network is disconnected ({len(roots)} components). "
+            f"Isolated groups: {sorted(components.values(), key=len)}. "
+            "Add bridging interferograms."
+        )
+
     design_matrix = build_design_matrix(ifg_date_pairs, unique_dates)
     AtA_inv = np.linalg.pinv(design_matrix.T @ design_matrix)
 
-    output_dir = ts_files[0].parent / "ionosphere"
+    if not output_dir:
+        output_dir = ts_files[0].parent / "ionosphere"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     gunw_iono_gdal_path = format_nc_filename(valid_gunw[0], iono_path)
@@ -500,6 +559,7 @@ def read_ionosphere_phase_screen(
         if wavelength is not None:
             iono *= -1 * wavelength / (4.0 * np.pi)
 
+        round_mantissa(iono, keep_bits=12)
         io.write_arr(
             arr=iono,
             like_filename=out_path,
