@@ -119,7 +119,7 @@ def sigma_to_spatial(sigma_px: float, pixel_size_m: float) -> dict:
     Parameters
     ----------
     sigma_px : float
-        Gaussian sigma in pixels (as passed to ``smooth_iono`` /
+        Gaussian sigma in pixels (as passed to ``smooth_iono`` or
         ``scipy.ndimage.gaussian_filter``).
     pixel_size_m : float
         Pixel size in metres (use the smaller of x/y resolution if they differ).
@@ -135,9 +135,9 @@ def sigma_to_spatial(sigma_px: float, pixel_size_m: float) -> dict:
     cutoff_m = 2.0 * np.pi * sigma_m / np.sqrt(np.log(2.0))  # ≈ 7.54 × σ
 
     print(f"sigma    = {sigma_px} px  →  {sigma_m:.0f} m")
-    print(f"FWHM     = {fwhm_m:.0f} m  ({fwhm_m/1000:.2f} km)  — spatial resolution")
+    print(f"FWHM     = {fwhm_m:.0f} m  ({fwhm_m / 1000:.2f} km)  — spatial resolution")
     print(
-        f"λ cutoff = {cutoff_m:.0f} m  ({cutoff_m/1000:.2f} km)"
+        f"λ cutoff = {cutoff_m:.0f} m  ({cutoff_m / 1000:.2f} km)"
         "  — features longer than this pass through"
     )
     return {"sigma_m": sigma_m, "fwhm_m": fwhm_m, "cutoff_wavelength_m": cutoff_m}

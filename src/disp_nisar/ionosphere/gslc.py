@@ -203,6 +203,8 @@ def estimate_pair_ionosphere(
     nodata_A, nodata_B : float
         Nodata sentinel values (dolphin default is 0.0).
 
+    # NOTE add masks to input
+
     Returns
     -------
     dict
@@ -370,6 +372,15 @@ def run_ionosphere_estimation(
     )
     print(f"Smoothing σ={smooth_sigma} px\n")
 
+    # ── masks — computed ONCE (geometry-driven, same for all pairs) ────────────
+    # sim_mask = make_similarity_mask(
+    #    sim_A_path = next(lp_dir_A.glob("similarity_*.tif")),
+    #    sim_B_path = next(lp_dir_B.glob("similarity_*.tif"), None),
+    #    match_path = ref_tif,
+    #    threshold  = 0.65,
+    # )
+    # print(f"Similarity mask: {100*sim_mask.mean():.1f}% valid")
+
     results = []
 
     for f_A_path in files_A:
@@ -384,16 +395,33 @@ def run_ionosphere_estimation(
 
         print(f"  {stem} ...", end=" ", flush=True)
 
+        # per-pair CRLB — use if available, else fall back to similarity only
+        # if (lp_dir_A / pair / "crlb").exists():
+        #    crlb_mask    = make_crlb_mask(
+        #        pair=pair, linked_phase_A=lp_dir_A, linked_phase_B=lp_dir_B,
+        #        match_path=f_A_path, threshold_rad=1.5,
+        #    )
+        #    quality_mask = crlb_mask | sim_mask
+        # else:
+        #    quality_mask = sim_mask
+        # print(f"Combined mask:   {100*quality_mask.mean():.1f}% valid\n")
+
         result = estimate_pair_ionosphere(
             disp_A_path=f_A_path,
             disp_B_path=map_B[stem],
             f_A=f_A,
             f_B=f_B,
             ref_point=ref_point,
-            smooth_sigma=smooth_sigma,
+            smooth_sigma=smooth_sigma,  # Note smoothing can be done later
             nodata_A=nodata_A,
             nodata_B=nodata_B,
         )
+
+        # iono_filled, qmask = apply_similarity_mask_and_fill(
+        # result["iono_disp_m"],
+        # sim_mask=quality_mask, existing_mask=result["mask"],
+        # fill_method="gaussian", smooth_sigma=50, mask_erosion_px=3,
+        # )
 
         # Use f_A_path as the georef template for all outputs
         write_tif(

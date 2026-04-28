@@ -366,10 +366,15 @@ class RunConfig(YamlModel):
         freq: str = frequency if frequency is not None else configured_freq
         if scratch_suffix is None:
             scratch_suffix = f"_{freq}" if freq != configured_freq else ""
+        iono_params_file = (
+            self.dynamic_ancillary_file_group.ionosphere_algorithm_parameters_file
+        )
+        if freq != configured_freq and iono_params_file is not None:
+            algo_file = iono_params_file
+        else:
+            algo_file = self.dynamic_ancillary_file_group.algorithm_parameters_file
         return self._build_workflow(
-            algorithm_parameters_file=(
-                self.dynamic_ancillary_file_group.algorithm_parameters_file
-            ),
+            algorithm_parameters_file=algo_file,
             frequency=freq,
             scratch_suffix=scratch_suffix,
         )
