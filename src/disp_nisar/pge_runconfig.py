@@ -73,8 +73,8 @@ class InputFileGroup(YamlModel):
         default_factory=list,
         description="list of paths to GSLC files.",
     )
-    frame_id: int = Field(
-        ...,
+    frame_id: Optional[int] = Field(
+        default=None,
         description="Frame ID of the gslcs contained in `gslc_file_list`.",
     )
     frequency: str = Field(
@@ -112,6 +112,13 @@ class DynamicAncillaryFileGroup(YamlModel):
     algorithm_parameters_file: Path = Field(
         default=...,
         description="Path to file containing SAS algorithm parameters.",
+    )
+    ionosphere_algorithm_parameters_file: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Path to file containing SAS algorithm parameters for ionosphere from"
+            " FreqA/B."
+        ),
     )
     mask_file: Optional[Path] = Field(
         None,
@@ -337,27 +344,113 @@ class RunConfig(YamlModel):
             **kwargs,
         )
 
-    def to_workflow(self):
-        """Convert to a `DisplacementWorkflow` object."""
-        # We need to go to/from the PGE format to dolphin's DisplacementWorkflow:
-        # Note that the top two levels of nesting can be accomplished by wrapping
-        # the normal model export in a dict.
-        #
-        # The things from the RunConfig that are used in the
-        # DisplacementWorkflow are the input files, PS amp mean/disp files,
-        # the output directory, and the scratch directory.
-        # All the other things come from the AlgorithmParameters.
+    def to_workflow(
+        self,
+        frequency: str | None = None,
+        scratch_suffix: str | None = None,
+    ):
+        """Convert to a `DisplacementWorkflow` object.
 
+        Parameters
+        ----------
+        frequency : str, optional
+            Frequency band override (e.g. ``"frequencyB"``).  Defaults to the
+            frequency set in ``input_file_group``.
+        scratch_suffix : str, optional
+            Suffix appended to ``scratch_path`` to keep separate work directories.
+            Defaults to ``""`` for the configured frequency, or ``"_<frequency>"``
+            when ``frequency`` overrides the configured value.
+
+        """
+        configured_freq = str(self.input_file_group.frequency)
+        freq: str = frequency if frequency is not None else configured_freq
+        if scratch_suffix is None:
+            scratch_suffix = f"_{freq}" if freq != configured_freq else ""
+        iono_params_file = (
+            self.dynamic_ancillary_file_group.ionosphere_algorithm_parameters_file
+        )
+        if freq != configured_freq and iono_params_file is not None:
+            algo_file = iono_params_file
+        else:
+            algo_file = self.dynamic_ancillary_file_group.algorithm_parameters_file
+        return self._build_workflow(
+            algorithm_parameters_file=algo_file,
+            frequency=freq,
+            scratch_suffix=scratch_suffix,
+        )
+
+    def to_ionosphere_workflow(self):
+        """Convert to a `DisplacementWorkflow` for the ionosphere (freqB) workflow.
+
+        Loads ``ionosphere_algorithm_parameters_file`` from the dynamic ancillary
+        group and switches the input frequency to ``frequencyB``.  Returns ``None``
+        if ``ionosphere_algorithm_parameters_file`` is not set.
+
+        """
+        iono_params_file = (
+            self.dynamic_ancillary_file_group.ionosphere_algorithm_parameters_file
+        )
+        if iono_params_file is None:
+            logger.warning(
+                "ionosphere_algorithm_parameters_file not set; "
+                "skipping ionosphere workflow"
+            )
+            return None
+        return self._build_workflow(
+            algorithm_parameters_file=iono_params_file,
+            frequency="frequencyB",
+            scratch_suffix="_ionosphere",
+        )
+
+    def _build_workflow(
+        self,
+        algorithm_parameters_file: Path,
+        frequency: str,
+        scratch_suffix: str = "",
+    ):
+        """Build a `DisplacementWorkflow` from this RunConfig.
+
+        Parameters
+        ----------
+        algorithm_parameters_file : Path
+            Path to the algorithm parameters YAML to load.
+        frequency : str
+            Frequency band to use (e.g. ``"frequencyA"`` or ``"frequencyB"``).
+        scratch_suffix : str
+            Suffix appended to ``scratch_path`` to keep freqA and freqB work
+            directories separate (e.g. ``"_ionosphere"``).
+
+        """
         # PGE doesn't sort the GSLCs in date order (or any order?)
         gslc_file_list = sort_files_by_date(self.input_file_group.gslc_file_list)[0]
-        scratch_directory = self.product_path_group.scratch_path
+        base_scratch = self.product_path_group.scratch_path
+        scratch_directory = (
+            base_scratch.with_name(base_scratch.name + scratch_suffix)
+            if scratch_suffix
+            else base_scratch
+        )
         mask_file = self.dynamic_ancillary_file_group.mask_file
         # geometry_files = self.dynamic_ancillary_file_group.geometry_files
-        ionosphere_files = self.dynamic_ancillary_file_group.gunw_files
+        configured_freq = str(self.input_file_group.frequency)
+        iono_params_file = (
+            self.dynamic_ancillary_file_group.ionosphere_algorithm_parameters_file
+        )
+        # GUNW-based ionosphere correction applies to the main (freqA) workflow only
+        # when no GSLC split-spectrum iono params file is specified.
+        # If ionosphere_algorithm_parameters_file is set, the freqB split-spectrum
+        # workflow handles ionosphere estimation instead.
+        ionosphere_files = (
+            self.dynamic_ancillary_file_group.gunw_files
+            if frequency == configured_freq and iono_params_file is None
+            else []
+        )
         # troposphere_files = self.dynamic_ancillary_file_group.troposphere_files
         dem_file = self.dynamic_ancillary_file_group.dem_file
         frame_id = self.input_file_group.frame_id
-        frequency = self.input_file_group.frequency
+        if frame_id is None:
+            raise ValueError(
+                "frame_id is required in input_file_group to build a workflow"
+            )
         if not isinstance(frequency, str):
             frequency = frequency.value
         polarization = self.input_file_group.polarization
@@ -366,9 +459,7 @@ class RunConfig(YamlModel):
         nisar_dataset_name = f"/science/LSAR/GSLC/grids/{frequency}/{polarization}"
 
         # Load the algorithm parameters from the file
-        algorithm_parameters = AlgorithmParameters.from_yaml(
-            self.dynamic_ancillary_file_group.algorithm_parameters_file,
-        )
+        algorithm_parameters = AlgorithmParameters.from_yaml(algorithm_parameters_file)
         overrides_file = (
             self.static_ancillary_file_group.algorithm_parameters_overrides_json
         )
@@ -461,6 +552,10 @@ class RunConfig(YamlModel):
                 algo_params.forward_mode_network_size
             )
 
+        log_file = self.log_file
+        if scratch_suffix and log_file is not None:
+            log_file = log_file.with_stem(log_file.stem + scratch_suffix)
+
         # unpacked to load the rest of the parameters for the DisplacementWorkflow
         return DisplacementWorkflow(
             cslc_file_list=gslc_file_list,
@@ -475,7 +570,7 @@ class RunConfig(YamlModel):
                 # geometry_files=[gunw_files[0]],
                 dem_file=dem_file,
             ),
-            log_file=self.log_file,
+            log_file=log_file,
             # Finally, the rest of the parameters are in the algorithm parameters
             **param_dict,
         )

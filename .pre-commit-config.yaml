@@ -1,5 +1,5 @@
 ci:
-  autofix_prs: false
+  autofix_prs: true
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -34,6 +34,7 @@ repos:
         - types-setuptools
         - types-requests
         - "pydantic>=2.4"
+        - types-markdown
 
   - repo: https://github.com/psf/black-pre-commit-mirror
     rev: "26.3.1"

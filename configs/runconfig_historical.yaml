@@ -19,6 +19,9 @@ dynamic_ancillary_file_group:
   # REQUIRED: Path to file containing SAS algorithm parameters.
   #   Type: string.
   algorithm_parameters_file: algorithm_parameters_historical.yaml
+  # REQUIRED: Path to file containing SAS algorithm parameters for ionosphere from FreqA/B.
+  #   Type: string.
+  ionosphere_algorithm_parameters_file: algorithm_iono_parameters_historical.yaml
   # Paths to the GSLC static_layer files (1 per burst) with line-of-sight unit vectors. If
   #   none provided, corrections using GSLC static_layer are skipped.
   #   Type: array.

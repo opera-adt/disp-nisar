@@ -25,17 +25,16 @@ from disp_nisar._masking import (
     create_mask_from_distance,  # , create_layover_shadow_masks
 )
 from disp_nisar._ps import precompute_ps
-from disp_nisar.ionosphere import read_ionosphere_phase_screen
-from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
-
-from ._reference import ReferencePoint, read_reference_point
-from ._utils import (
+from disp_nisar._reference import ReferencePoint, read_reference_point
+from disp_nisar._utils import (
     _convert_meters_to_radians,
     _create_correlation_images,
     _frequency_to_wavelength,
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
 )
+from disp_nisar.ionosphere import get_ionosphere_phase_screen
+from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +65,8 @@ def run(
 
     # Add a check to fail if passed duplicate dates area passed
     _assert_no_duplicate_dates(cfg.cslc_file_list)
+    _assert_compressed_slcs_consecutive(cfg.cslc_file_list)
+    _warn_date_gaps(cfg.cslc_file_list)
 
     # Handle forward mode - get second to last date for re-referencing
     gslc_dates = [get_dates(f)[0] for f in cfg.cslc_file_list]
@@ -156,15 +157,54 @@ def run(
     wavelength = _frequency_to_wavelength(
         pge_runconfig.input_file_group.frequency, cfg.cslc_file_list[0]
     )
+    # IONOSPHERE
+    if not pge_runconfig.dynamic_ancillary_file_group.gunw_files:
+        from disp_nisar.ionosphere import (
+            get_center_frequencies,
+            run_ionosphere_estimation,
+        )
 
-    # Read the ionosphere phase screen for timeseries from GUNW files
-    out_paths.ionospheric_corrections = read_ionosphere_phase_screen(
-        pge_runconfig.dynamic_ancillary_file_group.gunw_files,
-        out_paths.timeseries_paths,
-        frequency=pge_runconfig.input_file_group.frequency,
-        polarization=pge_runconfig.input_file_group.polarization,
-    )
+        # if GUNW are not specified, run splitspectrum based on freq.A/B
+        # load algorithm_ionosphere_parameters.yaml for freq.B
+        cfg_freqB = pge_runconfig.to_workflow(
+            frequency="frequencyB", scratch_suffix="_freqB"
+        )
+        # Mirror freqA spatial extent so freqB processes the same area
+        # pge_runconfig.py:521-523 always overwrites bounds from the frame_id lookup
+        cfg_freqB.output_options.bounds = cfg.output_options.bounds
+        cfg_freqB.output_options.bounds_epsg = cfg.output_options.bounds_epsg
+        cfg_freqB.output_options.epsg = cfg.output_options.epsg
 
+        # Note: implement and test carying compressed slcs
+        # with forward/historical mode, for workflow with freqB
+        # probably keep it same as freqA to keep it consistent
+        run_displacement(cfg=cfg_freqB, debug=debug)
+
+        # Run split-spectrum ionosphere estimation for freq.B and freq.A
+        # use runconfigs as input to run_ionosphere_estimation.
+        f_A, f_B = get_center_frequencies(cfg_freqB.cslc_file_list[0])
+        out_paths.ionospheric_corrections = [
+            iono_path
+            for _, iono_path, _ in run_ionosphere_estimation(
+                ts_dir_A=cfg.work_directory / "timeseries",  # TODO: use out_paths
+                ts_dir_B=cfg_freqB.work_directory / "timeseries",
+                out_dir=cfg.work_directory / "ionosphere",
+                f_A=f_A,
+                f_B=f_B,
+                smooth_sigma=5.0,  # expose smoothing as a parameter.
+            )
+        ]
+    else:
+        # Read the ionosphere phase screen for timeseries from GUNW files
+        out_paths.ionospheric_corrections = get_ionosphere_phase_screen(
+            pge_runconfig.dynamic_ancillary_file_group.gunw_files,
+            out_paths.timeseries_paths,
+            frequency=pge_runconfig.input_file_group.frequency,
+            polarization=pge_runconfig.input_file_group.polarization,
+        )
+
+    # Note: move correcting nominal displacement with ionosphere inside the
+    # create_products function, or just pulling it out from iono_corrected dir
     create_products(
         out_paths=out_paths,
         cfg=cfg,
@@ -423,6 +463,55 @@ def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:
         file_string = "\n".join(sensing_date_list)
         msg += file_string
         raise ValueError(msg)
+
+
+def _assert_compressed_slcs_consecutive(input_file_list: Sequence[Path]) -> None:
+    """Assert that compressed SLCs form a gapless chain when sorted by their end date.
+
+    Each compressed SLC covers [start_date, end_date].  For a valid stack the
+    end_date of compressed SLC N must equal the start_date of compressed SLC N+1.
+    A gap means a ministack was skipped and the phase history is broken.
+    """
+    from dolphin.stack import CompressedSlcInfo
+
+    compressed = [f for f in input_file_list if "compressed" in str(f).lower()]
+    if len(compressed) < 2:
+        return
+
+    infos = sorted(
+        [CompressedSlcInfo.from_filename(f) for f in compressed],
+        key=lambda x: x.end_date,
+    )
+
+    for prev, curr in zip(infos, infos[1:]):
+        if prev.end_date != curr.start_date:
+            raise ValueError(
+                f"Gap in compressed SLC chain: {prev.end_date} → {curr.start_date}. "
+                f"Ministack between {prev.end_date} and {curr.start_date} is missing. "
+                f"Files:\n  {prev.output_folder}\n  {curr.output_folder}"
+            )
+
+
+def _warn_date_gaps(
+    input_file_list: Sequence[Path],
+    max_gap_days: int = 730,
+) -> None:
+    """Warn if any consecutive GSLC dates are separated by more than `max_gap_days`."""
+    is_compressed = ["compressed" in str(f).lower() for f in input_file_list]
+    non_compressed = [f for f, c in zip(input_file_list, is_compressed) if not c]
+    dates = sorted(get_dates(f)[0] for f in non_compressed)
+    if len(dates) < 2:
+        return
+    for d0, d1 in zip(dates, dates[1:]):
+        gap = (d1 - d0).days
+        if gap > max_gap_days:
+            logger.warning(
+                "Large temporal gap of %d days (> %d) between %s and %s",
+                gap,
+                max_gap_days,
+                d0.date() if hasattr(d0, "date") else d0,
+                d1.date() if hasattr(d1, "date") else d1,
+            )
 
 
 def _get_near_far_incidence_angles(geometry_files: list[Path]) -> tuple[float, float]:
