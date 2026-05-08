@@ -203,6 +203,12 @@ def dem(
     "-b", "--bbox", type=float, nargs=4, help="Bounding box (WSEN, decimal degrees)"
 )
 @click.option(
+    "-g",
+    "--gslc-file",
+    type=click.Path(exists=True, path_type=Path),
+    help="NISAR GSLC HDF5 file; bbox is extracted from its grid extent",
+)
+@click.option(
     "-m", "--margin", type=int, default=5, help="Margin for bounding box in km"
 )
 @click.option(
@@ -232,6 +238,7 @@ def water_mask(
     output: Path,
     frame_id: int | None,
     bbox: Bbox | None,
+    gslc_file: Path | None,
     margin: int,
     land_buffer: int,
     ocean_buffer: int,
@@ -242,18 +249,20 @@ def water_mask(
     """Download and create a binary water mask for a geographic region.
 
     The water mask is downloaded from S3 and processed to create a binary mask.
-    Either --frame-id or --bbox must be provided.
+    Provide one of --frame-id, --bbox, or --gslc-file.
     """
     from disp_nisar._water import create_water_mask
 
-    if frame_id is None and bbox is None:
-        raise click.UsageError("Must provide --frame-id or --bbox")
-    if frame_id is not None and bbox is not None:
-        raise click.UsageError("Only may provide --frame-id or --bbox, not both")
+    provided = sum(x is not None for x in [frame_id, bbox, gslc_file])
+    if provided == 0:
+        raise click.UsageError("Must provide one of --frame-id, --bbox, or --gslc-file")
+    if provided > 1:
+        raise click.UsageError("Provide only one of --frame-id, --bbox, or --gslc-file")
 
     create_water_mask(
         frame_id=frame_id,
         bbox=bbox,
+        gslc_file=gslc_file,
         output=output,
         margin=margin,
         land_buffer=land_buffer,
