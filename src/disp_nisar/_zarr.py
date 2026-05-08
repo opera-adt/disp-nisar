@@ -222,6 +222,11 @@ def gslc_to_zarr(
                     slc_buf[i] = h[f"{grp_path}/{pol}"][row_start:row_end, :]
                     mask_buf[i] = h[f"{grp_path}/mask"][row_start:row_end, :]
 
+                # Zero out invalid pixels (mask==0) so downstream JAX/cuSolver
+                # never receives NaN. Dolphin skips blocks that are all-zero,
+                # so this converts nodata edge regions to skippable zeros.
+                slc_buf[mask_buf == 0] = 0
+
                 slc_arr[:, row_start:row_end, :] = slc_buf
                 mask_arr[:, row_start:row_end, :] = mask_buf
 
