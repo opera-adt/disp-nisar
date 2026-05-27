@@ -125,7 +125,7 @@ def run(
 
     # Run dolphin's displacement workflow
     # Note: For NISAR, there's no stitching needed since it's one huge frame
-    out_paths = run_displacement(cfg=cfg, debug=debug)
+    out_paths = run_displacement(cfg=cfg, debug=debug, raise_on_empty=False)
 
     assert out_paths.timeseries_paths is not None
     assert out_paths.timeseries_residual_paths is not None
