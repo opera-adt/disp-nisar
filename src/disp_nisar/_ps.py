@@ -13,6 +13,8 @@ from dolphin.utils import DummyProcessPoolExecutor
 from dolphin.workflows.config import DisplacementWorkflow
 from dolphin.workflows.wrapped_phase import _get_mask
 
+from ._streaming import XarrayStackReader, is_remote_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,21 +65,68 @@ def run_frame_ps(cfg: DisplacementWorkflow) -> tuple[Path, Path]:
     non_compressed_slcs = [
         f for f, is_comp in zip(input_file_list, is_compressed) if not is_comp
     ]
-    vrt_stack = io.VRTStack(
-        non_compressed_slcs,
-        subdataset=subdataset,
-        outfile=cfg.work_directory / "non_compressed_slc_stack.vrt",
-    )
+
+    # Check if any files are remote URLs
+    has_remote_files = any(is_remote_url(f) for f in non_compressed_slcs)
+
+    if has_remote_files:
+        logger.info("Detected remote files, using XarrayStackReader with dask")
+
+        # Get 2D block_shape from worker_settings (row, col)
+        block_shape_2d = cfg.worker_settings.block_shape
+        logger.info(f"Using block_shape from config: {block_shape_2d}")
+
+        # Convert to 3D chunks: (time, row, col)
+        # Process one time slice at a time
+        chunks_3d = {"time": 1, "row": block_shape_2d[0], "col": block_shape_2d[1]}
+
+        # Get number of workers from worker_settings
+        n_workers = cfg.worker_settings.n_parallel_bursts
+        logger.info(f"Using n_parallel_bursts from config: {n_workers}")
+
+        # Get halo size from phase_linking half_window if available
+        # This is used for operations that need neighboring pixels
+        if hasattr(cfg, 'phase_linking') and hasattr(cfg.phase_linking, 'half_window'):
+            halo_rows = cfg.phase_linking.half_window.y
+            halo_cols = cfg.phase_linking.half_window.x
+            logger.info(f"Using halo from phase_linking.half_window: row={halo_rows}, col={halo_cols}")
+        else:
+            halo_rows = 0
+            halo_cols = 0
+
+        # Build overlap dict: {0: time, 1: row, 2: col}
+        overlap = {0: 0, 1: halo_rows, 2: halo_cols} if halo_rows > 0 else None
+
+        # Use xarray-based reader for remote files with dask chunking
+        vrt_stack = XarrayStackReader(
+            file_list=non_compressed_slcs,
+            subdataset=subdataset,
+            chunks=chunks_3d,  # 3D chunks: (time, row, col)
+            nodata=np.nan,
+            overlap=overlap,
+            n_workers=n_workers,  # Configure dask workers
+        )
+    else:
+        # Use traditional VRT for local files
+        vrt_stack = io.VRTStack(
+            non_compressed_slcs,
+            subdataset=subdataset,
+            outfile=cfg.work_directory / "non_compressed_slc_stack.vrt",
+        )
 
     layover_shadow_mask = (
         cfg.layover_shadow_mask_files[0] if cfg.layover_shadow_mask_files else None
     )
+
+    # For remote files, XarrayStackReader doesn't have an outfile, so use first file
+    like_file = vrt_stack.outfile if hasattr(vrt_stack, 'outfile') else non_compressed_slcs[0]
+
     mask_filename = _get_mask(
         output_dir=cfg.work_directory,
         output_bounds=cfg.output_options.bounds,
         output_bounds_wkt=cfg.output_options.bounds_wkt,
         output_bounds_epsg=cfg.output_options.bounds_epsg,
-        like_filename=vrt_stack.outfile,
+        like_filename=like_file,
         layover_shadow_mask=layover_shadow_mask,
         cslc_file_list=non_compressed_slcs,
     )
@@ -97,7 +146,7 @@ def run_frame_ps(cfg: DisplacementWorkflow) -> tuple[Path, Path]:
             output_file=output_file_list[0],
             output_amp_mean_file=output_file_list[1],
             output_amp_dispersion_file=output_file_list[2],
-            like_filename=vrt_stack.outfile,
+            like_filename=like_file,
             amp_dispersion_threshold=cfg.ps_options.amp_dispersion_threshold,
             nodata_mask=nodata_mask,
             block_shape=cfg.worker_settings.block_shape,
@@ -115,6 +164,7 @@ def run_frame_ps(cfg: DisplacementWorkflow) -> tuple[Path, Path]:
         compressed_slc_files,
         num_slc=len(non_compressed_slcs),
         subdataset=subdataset,
+        n_workers=cfg.worker_settings.n_parallel_bursts if has_remote_files else None,
     )
 
 
@@ -125,6 +175,7 @@ def run_combine(
     num_slc: int,
     weight_scheme: WeightScheme = WeightScheme.EXPONENTIAL,
     subdataset: str = "/science/LSAR/GSLC/grids/frequencyA/HH",
+    n_workers: int | None = None,
 ) -> tuple[Path, Path]:
     out_dispersion = cur_dispersion.parent / "combined_dispersion.tif"
     out_mean = cur_mean.parent / "combined_mean.tif"
@@ -132,16 +183,42 @@ def run_combine(
         logger.info(f"{out_mean} and {out_dispersion} exist, skipping")
         return out_dispersion, out_mean
 
-    reader_compslc = io.HDF5StackReader.from_file_list(
-        file_list=compressed_slc_files,
-        dset_names=subdataset,
-        nodata=np.nan,
-    )
-    reader_compslc_dispersion = io.HDF5StackReader.from_file_list(
-        file_list=compressed_slc_files,
-        dset_names="/data/amplitude_dispersion",
-        nodata=np.nan,
-    )
+    # Check if compressed files are remote
+    has_remote_compressed = any(is_remote_url(f) for f in compressed_slc_files)
+
+    if has_remote_compressed:
+        logger.info("Using XarrayStackReader for remote compressed SLC files")
+
+        # Use same block shape as before - default to (256, 256) if not in scope
+        # Typically run_combine is called from run_frame_ps context
+        block_shape_2d = (256, 256)  # Default for block reading
+        chunks_3d = {"time": 1, "row": block_shape_2d[0], "col": block_shape_2d[1]}
+
+        reader_compslc = XarrayStackReader(
+            file_list=compressed_slc_files,
+            subdataset=subdataset,
+            chunks=chunks_3d,
+            nodata=np.nan,
+            n_workers=n_workers,
+        )
+        reader_compslc_dispersion = XarrayStackReader(
+            file_list=compressed_slc_files,
+            subdataset="/data/amplitude_dispersion",
+            chunks=chunks_3d,
+            nodata=np.nan,
+            n_workers=n_workers,
+        )
+    else:
+        reader_compslc = io.HDF5StackReader.from_file_list(
+            file_list=compressed_slc_files,
+            dset_names=subdataset,
+            nodata=np.nan,
+        )
+        reader_compslc_dispersion = io.HDF5StackReader.from_file_list(
+            file_list=compressed_slc_files,
+            dset_names="/data/amplitude_dispersion",
+            nodata=np.nan,
+        )
     reader_mean = io.RasterReader.from_file(cur_mean, band=1)
     reader_dispersion = io.RasterReader.from_file(cur_dispersion, band=1)
 

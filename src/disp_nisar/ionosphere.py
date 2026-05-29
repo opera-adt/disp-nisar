@@ -14,6 +14,8 @@ from opera_utils import get_dates
 from opera_utils._utils import format_nc_filename
 from opera_utils.stitching import warp_to_match
 
+from ._streaming import open_h5_file
+
 logger = logging.getLogger(__name__)
 
 # NISAR GUNW HDF5 paths
@@ -38,7 +40,7 @@ def get_gunw_dates(gunw_file: Path) -> tuple:
         (reference_datetime, secondary_datetime) tuple.
 
     """
-    with h5py.File(gunw_file, "r") as f:
+    with open_h5_file(gunw_file, "r") as f:
         id_group = f[GUNW_IDENTIFICATION_PATH]
         # NISAR GUNW stores dates in identification group
         ref_date = id_group["referenceZeroDopplerStartTime"][()].decode()
@@ -74,7 +76,7 @@ def read_ionosphere_from_gunw(
     iono_path = GUNW_IONO_PATH_TEMPLATE.format(
         frequency=frequency, polarization=polarization
     )
-    with h5py.File(gunw_file, "r") as f:
+    with open_h5_file(gunw_file, "r") as f:
         if iono_path not in f:
             logger.warning(
                 f"Ionosphere dataset not found at {iono_path} in {gunw_file}"
@@ -292,7 +294,7 @@ def read_ionosphere_phase_screen(
     for gunw_file in sorted(gunw_files):
         try:
             ref_date, sec_date = get_gunw_dates(gunw_file)
-            with h5py.File(gunw_file, "r") as f:
+            with open_h5_file(gunw_file, "r") as f:
                 if iono_path not in f:
                     logger.warning(
                         f"Ionosphere path not found in {gunw_file}, skipping"

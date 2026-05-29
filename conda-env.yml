@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
-  - python>=3.9,<3.12
+  - python>=3.9
   - pip>=21.3  # https://pip.pypa.io/en/stable/reference/build-system/pyproject-toml/#editable-installation
   - git  # for pip install, due to setuptools_scm
   - click>=7.0
@@ -20,6 +20,9 @@ dependencies:
   - pysolid  # For solid earth tide corrections
   # - pyaps3
   - xarray
+  - earthaccess  # For streaming remote GSLC files
+  - dask  # For parallel processing with chunking
+  - distributed  # For dask multi-worker parallelism
   # Unwrappers:
   - snaphu>=0.4.1
   - isce3-cpu>=0.16.0 # For baseline

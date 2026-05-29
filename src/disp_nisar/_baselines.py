@@ -9,10 +9,12 @@ from opera_utils import (
 )
 from pyproj import CRS, Transformer
 
+from ._streaming import open_h5_file
+
 
 def _get_look_side(h5file: Filename) -> isce3.core.LookSide:
     """Get the look side from a NISAR GSLC HDF5 file."""
-    with h5py.File(h5file, "r") as hf:
+    with open_h5_file(h5file, "r") as hf:
         # Try NISAR path first
         for path in [
             "/science/LSAR/identification/lookDirection",

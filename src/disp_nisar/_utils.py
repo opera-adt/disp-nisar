@@ -20,6 +20,8 @@ from osgeo import gdal
 from shapely.geometry import LinearRing, MultiPolygon, Polygon
 from tqdm.contrib.concurrent import thread_map
 
+from ._streaming import open_h5_file
+
 logger = logging.getLogger(__name__)
 
 gdal.UseExceptions()
@@ -316,10 +318,8 @@ def get_nisar_frame_bbox(
 
     """
     if cslc_file.suffix in {".h5", ".hdf5"}:
-        import h5py
-
         # Read CRS and bounds directly from NISAR HDF5 metadata
-        with h5py.File(cslc_file, "r") as h5f:
+        with open_h5_file(cslc_file, "r") as h5f:
             grid_group = h5f[f"science/LSAR/GSLC/grids/{frequency}"]
             epsg = int(grid_group["projection"][()])
 
@@ -336,10 +336,8 @@ def get_nisar_frame_bbox(
                 float(y_coords.max()) + abs(y_spacing) / 2,
             )
     else:
-        import h5py
-
         # Alternative format handling (non-NISAR HDF5)
-        with h5py.File(cslc_file, "r") as src:
+        with open_h5_file(cslc_file, "r") as src:
             epsg = src["data"]["spatial_ref"][()]
             data = src["data"]
 

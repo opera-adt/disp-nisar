@@ -25,6 +25,7 @@ from disp_nisar._masking import (
     create_mask_from_distance,  # , create_layover_shadow_masks
 )
 from disp_nisar._ps import precompute_ps
+from disp_nisar._streaming import open_h5_file
 from disp_nisar.ionosphere import read_ionosphere_phase_screen
 from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
@@ -426,12 +427,11 @@ def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:
 
 
 def _get_near_far_incidence_angles(geometry_files: list[Path]) -> tuple[float, float]:
-    import h5py
     import numpy as np
 
     ##TODO: min and max of incidence angle in the data in radar grid
 
-    with h5py.File(geometry_files[0]) as ds:
+    with open_h5_file(geometry_files[0]) as ds:
         incidence_angles = ds["/science/LSAR/GUNW/metadata/radarGrid/incidenceAngle"][
             ()
         ]
