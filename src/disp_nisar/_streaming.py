@@ -111,8 +111,11 @@ def open_remote_file(file_url: str) -> Any:
     return file_obj
 
 
-def open_h5_file(file_path: str | Path, mode: str = "r") -> h5py.File:
+def open_h5_file(file_path: str | Path, mode: str = "r"):
     """Open an HDF5 file, supporting both local and remote paths.
+
+    For remote files, uses h5netcdf with earthaccess for better compatibility.
+    For local files, uses h5py (faster).
 
     Parameters
     ----------
@@ -123,15 +126,102 @@ def open_h5_file(file_path: str | Path, mode: str = "r") -> h5py.File:
 
     Returns
     -------
-    h5py.File
-        Opened HDF5 file object.
+    h5py.File or h5netcdf.legacyapi.File
+        Opened HDF5 file object. Both have compatible interfaces.
+
+    Examples
+    --------
+    >>> with open_h5_file("/local/file.h5") as f:  # doctest: +SKIP
+    ...     data = f['/dataset'][:]
+
+    >>> with open_h5_file("s3://bucket/file.h5") as f:  # doctest: +SKIP
+    ...     data = f['/dataset'][:]
 
     """
     if is_remote_url(file_path):
-        file_obj = open_remote_file(str(file_path))
-        return h5py.File(file_obj, mode)
+        # Use h5netcdf + earthaccess for remote files
+        if not HAS_EARTHACCESS:
+            msg = (
+                "earthaccess and h5netcdf are required for remote files. "
+                "Install with: pip install earthaccess h5netcdf"
+            )
+            raise ImportError(msg)
+
+        import h5netcdf.legacyapi
+
+        # Authenticate with earthaccess
+        authenticate_earthdata()
+
+        # Get fsspec file object from earthaccess
+        file_objs = earthaccess.open([str(file_path)])
+        if not file_objs:
+            raise FileNotFoundError(f"Could not open remote file: {file_path}")
+
+        file_obj = file_objs[0]
+
+        # Open with h5netcdf (compatible with h5py interface)
+        return h5netcdf.legacyapi.File(file_obj, mode)
     else:
+        # Use h5py for local files (faster)
         return h5py.File(file_path, mode)
+
+
+def open_xarray_group(
+    file_path: str | Path,
+    group: str,
+    phony_dims: str = "access",
+) -> "xr.Dataset":
+    """Open a specific group from an HDF5 file using xarray.
+
+    This is useful for reading metadata and coordinates from remote files.
+
+    Parameters
+    ----------
+    file_path : str | Path
+        Path to the HDF5 file (local or remote).
+    group : str
+        HDF5 group path (e.g., "/science/LSAR/GSLC/grids/frequencyA").
+    phony_dims : str, optional
+        How to handle dimensions, by default "access".
+
+    Returns
+    -------
+    xr.Dataset
+        Xarray dataset for the group.
+
+    Examples
+    --------
+    >>> # Read metadata from remote file
+    >>> ds = open_xarray_group(
+    ...     "s3://bucket/file.h5",
+    ...     "/science/LSAR/GSLC/grids/frequencyA"
+    ... )  # doctest: +SKIP
+    >>> print(ds.coords)  # Shows row, col, x, y coordinates  # doctest: +SKIP
+
+    """
+    if not HAS_EARTHACCESS:
+        msg = "earthaccess and xarray required. Install with: pip install earthaccess xarray h5netcdf"
+        raise ImportError(msg)
+
+    import xarray as xr
+
+    if is_remote_url(file_path):
+        # Authenticate and open remote file
+        authenticate_earthdata()
+        file_objs = earthaccess.open([str(file_path)])
+        if not file_objs:
+            raise FileNotFoundError(f"Could not open: {file_path}")
+        file_obj = file_objs[0]
+    else:
+        file_obj = str(file_path)
+
+    # Open with xarray
+    return xr.open_dataset(
+        file_obj,
+        group=group,
+        engine="h5netcdf",
+        phony_dims=phony_dims,
+    )
 
 
 def open_xarray_dataset(
