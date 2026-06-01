@@ -94,6 +94,23 @@ class InputFileGroup(YamlModel):
             " output all products."
         ),
     )
+    azimuth_blocks: int = Field(
+        1,
+        description=(
+            "When the input does not match OPERA-burst naming (e.g. NISAR), split"
+            " each input frame into this many azimuth blocks and process each block"
+            " as a synthetic burst. Default 1 = no splitting."
+        ),
+        ge=1,
+    )
+    halo_rows: Optional[int] = Field(
+        None,
+        description=(
+            "Halo (input rows) on each side of an azimuth block. Default:"
+            " max(half_window_y, similarity_search_radius * stride_y,"
+            " (corr_window_y // 2) * stride_y) + 5."
+        ),
+    )
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
@@ -426,6 +443,8 @@ class RunConfig(YamlModel):
         input_options = {
             "subdataset": nisar_dataset_name,
             "wavelength": wavelength,
+            "azimuth_blocks": self.input_file_group.azimuth_blocks,
+            "halo_rows": self.input_file_group.halo_rows,
         }  # param_dict.pop("subdataset")}
         param_dict["output_options"]["epsg"] = bounds_epsg
         param_dict["output_options"]["bounds"] = bounds
@@ -522,6 +541,8 @@ class RunConfig(YamlModel):
                 frame_id=frame_id,
                 frequency=frequency,
                 polarization=polarization,
+                azimuth_blocks=workflow.input_options.azimuth_blocks,
+                halo_rows=workflow.input_options.halo_rows,
             ),
             dynamic_ancillary_file_group=DynamicAncillaryFileGroup(
                 algorithm_parameters_file=algorithm_parameters_file,
