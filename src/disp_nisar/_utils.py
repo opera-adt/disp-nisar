@@ -292,7 +292,7 @@ def _convert_meters_to_radians(
 
 
 def get_nisar_frame_bbox(
-    cslc_file: Path,
+    cslc_file: PathOrStr,
     frequency: str = "frequencyA",
     polarization: str = "HH",  # noqa: ARG001
 ) -> tuple[int, Bbox]:
@@ -317,7 +317,7 @@ def get_nisar_frame_bbox(
     ValueError: If required metadata is missing
 
     """
-    if cslc_file.suffix in {".h5", ".hdf5"}:
+    if Path(cslc_file).suffix in {".h5", ".hdf5"}:
         # Read CRS and bounds directly from NISAR HDF5 metadata
         with open_h5_file(cslc_file, "r") as h5f:
             grid_group = h5f[f"science/LSAR/GSLC/grids/{frequency}"]

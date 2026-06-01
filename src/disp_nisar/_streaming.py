@@ -147,7 +147,7 @@ def open_h5_file(file_path: str | Path, mode: str = "r"):
             )
             raise ImportError(msg)
 
-        import h5netcdf.legacyapi
+        import h5netcdf
 
         # Authenticate with earthaccess
         authenticate_earthdata()
@@ -160,7 +160,7 @@ def open_h5_file(file_path: str | Path, mode: str = "r"):
         file_obj = file_objs[0]
 
         # Open with h5netcdf (compatible with h5py interface)
-        return h5netcdf.legacyapi.File(file_obj, mode)
+        return h5netcdf.File(file_obj, mode, invalid_netcdf=True)
     else:
         # Use h5py for local files (faster)
         return h5py.File(file_path, mode)
@@ -405,21 +405,21 @@ class XarrayStackReader:
         )
 
         # JAX configuration
-        os.environ['XLA_FLAGS'] = (
-            f'--xla_cpu_multi_thread_eigen=true '
-            f'intra_op_parallelism_threads={threads_per_worker} '
-            f'inter_op_parallelism_threads=1'
+        os.environ["XLA_FLAGS"] = (
+            f"--xla_cpu_multi_thread_eigen=true "
+            f"intra_op_parallelism_threads={threads_per_worker} "
+            f"inter_op_parallelism_threads=1"
         )
 
         # NumPy/BLAS threading (used by JAX backend)
-        os.environ['OMP_NUM_THREADS'] = str(threads_per_worker)
-        os.environ['MKL_NUM_THREADS'] = str(threads_per_worker)
-        os.environ['OPENBLAS_NUM_THREADS'] = str(threads_per_worker)
-        os.environ['NUMEXPR_NUM_THREADS'] = str(threads_per_worker)
+        os.environ["OMP_NUM_THREADS"] = str(threads_per_worker)
+        os.environ["MKL_NUM_THREADS"] = str(threads_per_worker)
+        os.environ["OPENBLAS_NUM_THREADS"] = str(threads_per_worker)
+        os.environ["NUMEXPR_NUM_THREADS"] = str(threads_per_worker)
 
         # Prevent JAX from pre-allocating all GPU memory
-        os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
-        os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.75'
+        os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+        os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.75"
 
         logger.info(
             f"Set thread limits: OMP={threads_per_worker}, "
@@ -432,6 +432,7 @@ class XarrayStackReader:
             # Check if a dask client already exists
             try:
                 from dask.distributed import get_client
+
                 client = get_client()
                 logger.info(
                     f"Using existing dask client with {len(client.cluster.workers)} workers"
@@ -455,7 +456,8 @@ class XarrayStackReader:
                 "Install with: pip install 'dask[distributed]'"
             )
             import dask
-            dask.config.set(scheduler='threads', num_workers=n_workers)
+
+            dask.config.set(scheduler="threads", num_workers=n_workers)
 
     def _open_dataset(self, chunks: dict[str, int]) -> None:
         """Open the dataset using xarray."""
@@ -510,7 +512,7 @@ class XarrayStackReader:
         result = self.data[key]
 
         # Load the data if it's a dask array
-        if hasattr(result, 'compute'):
+        if hasattr(result, "compute"):
             result = result.compute()
 
         # Convert to numpy array and handle nodata
@@ -569,7 +571,9 @@ class XarrayStackReader:
 
         if depth is None:
             if self.overlap is None:
-                raise ValueError("No overlap specified. Provide depth or set overlap in __init__")
+                raise ValueError(
+                    "No overlap specified. Provide depth or set overlap in __init__"
+                )
             depth = self.overlap
 
         # Get the dask array from xarray
@@ -588,6 +592,7 @@ class XarrayStackReader:
 
         # Return as xarray DataArray with same coords/dims
         import xarray as xr
+
         return xr.DataArray(
             processed,
             coords=self.data.coords,
@@ -612,7 +617,7 @@ class XarrayStackReader:
 
     def close(self) -> None:
         """Close the dataset."""
-        if hasattr(self, 'ds'):
+        if hasattr(self, "ds"):
             self.ds.close()
 
     def __enter__(self):
@@ -646,9 +651,7 @@ class StreamingFileManager:
 
     """
 
-    def __init__(
-        self, file_list: list[str | Path], authenticate: bool = True
-    ) -> None:
+    def __init__(self, file_list: list[str | Path], authenticate: bool = True) -> None:
         """Initialize the streaming file manager."""
         self.file_list = file_list
         self.remote_files = [f for f in file_list if is_remote_url(f)]

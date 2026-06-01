@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 class InputFileGroup(YamlModel):
     """Inputs for A group of input files."""
 
-    gslc_file_list: List[Path] = Field(
+    gslc_file_list: List[PathOrStr] = Field(
         default_factory=list,
         description="list of paths to GSLC files.",
     )
@@ -146,7 +146,7 @@ class DynamicAncillaryFileGroup(YamlModel):
         ),
     )
     # Geocoded unwrapped files for ionosphere correction, SET and static geometry layers
-    gunw_files: List[Path] = Field(
+    gunw_files: List[PathOrStr] = Field(
         description=(
             "List of paths to GUNW files for ionosphere, SET and static geometry layers"
         ),
@@ -154,7 +154,7 @@ class DynamicAncillaryFileGroup(YamlModel):
 
     # Troposphere weather model
     # TODO: This has to be correction layers provided by tropo SAS separately
-    troposphere_files: Optional[List[Path]] = Field(
+    troposphere_files: Optional[List[PathOrStr]] = Field(
         default=None,
         description=(
             "List of paths to troposphere weather model files (1 per date). If none"
