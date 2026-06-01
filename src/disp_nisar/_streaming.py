@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import h5py
 import numpy as np
+from opera_utils import is_remote_url
 
 logger = logging.getLogger(__name__)
 
@@ -20,25 +20,6 @@ try:
 except ImportError:
     HAS_EARTHACCESS = False
     logger.debug("earthaccess not available, remote streaming disabled")
-
-
-def is_remote_url(file_path: str | Path) -> bool:
-    """Check if a file path is a remote URL (https:// or s3://).
-
-    Parameters
-    ----------
-    file_path : str | Path
-        File path to check.
-
-    Returns
-    -------
-    bool
-        True if the path is a remote URL, False otherwise.
-
-    """
-    path_str = str(file_path)
-    parsed = urlparse(path_str)
-    return parsed.scheme in ("https", "http", "s3")
 
 
 def authenticate_earthdata() -> Any:
