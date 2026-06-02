@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Groups copied wholesale (small — orbit, identification, processing metadata).
 _ALWAYS_KEEP_GROUPS = (
     "/science/LSAR/identification",
-    "/science/LSAR/GSLC/metadata",
+    "/science/LSAR/GSLC/metadata/radarGrid",
     "/science/LSAR/GSLC/metadata/orbit",
 )
 
@@ -41,6 +41,7 @@ _GRID_AUX_DATASETS = (
     "yCoordinateSpacing",
     "centerFrequency",
     "listOfPolarizations",
+    "mask",
 )
 
 
@@ -48,7 +49,9 @@ def _normalize_url(url: str) -> str:
     return re.sub(r"^(https?|s3):/(?!/)", r"\1://", url)
 
 
-def _extract_subset(src_path: Path, dst_path: Path, frequency: str, polarization: str) -> None:
+def _extract_subset(
+    src_path: Path, dst_path: Path, frequency: str, polarization: str
+) -> None:
     """Locally copy only the needed datasets/groups into a smaller file.
 
     HDF5 dimension scales use object references (DIMENSION_LIST / REFERENCE_LIST)
@@ -223,7 +226,6 @@ def stage_remote_gslcs(
 
 def run_dolphin_with_earthaccess(
     config_file: str | Path,
-    scratch_dir: Path | str = Path("./scratch_slcs"),
     debug: bool = False,
     n_workers: int = 6,
 ) -> None:
@@ -233,6 +235,7 @@ def run_dolphin_with_earthaccess(
 
     pge_runconfig = RunConfig.from_yaml(str(config_file))
 
+    scratch_dir = pge_runconfig.product_path_group.scratch_path / "stage_inputs"
     gslc_files = pge_runconfig.input_file_group.gslc_file_list
     if any(is_remote_url(f) for f in gslc_files):
         frequency = pge_runconfig.input_file_group.frequency
