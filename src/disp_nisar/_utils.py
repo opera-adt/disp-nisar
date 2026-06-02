@@ -352,7 +352,20 @@ def get_nisar_frame_bbox(
 
 
 def _frequency_to_wavelength(frequency: str, gslc_file: Filename) -> float:
+    import re
+
+    from opera_utils import is_remote_url
+    from opera_utils._remote import open_h5 as open_remote_h5
+
     dset = f"/science/LSAR/GSLC/grids/{frequency}/centerFrequency"
-    center_frequency = _get_dset_and_attrs(filename=gslc_file, dset_name=dset)[0]
+    file_str = str(gslc_file)
+    # Normalize malformed URLs missing one slash (e.g., https:/ -> https://)
+    file_str = re.sub(r"^(https?|s3):/(?!/)", r"\1://", file_str)
+
+    if is_remote_url(file_str):
+        with open_remote_h5(file_str) as hf:
+            center_frequency = float(hf[dset][()])
+    else:
+        center_frequency = _get_dset_and_attrs(filename=file_str, dset_name=dset)[0]
     wavelength = SPEED_OF_LIGHT / center_frequency
     return wavelength

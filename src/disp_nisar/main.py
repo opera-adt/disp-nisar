@@ -104,13 +104,47 @@ def run(
     else:
         water_binary_mask = None
 
-    # TODO: There is no layover/shadow mask in static layers, what to do instead?
-    # if len(cfg.correction_options.geometry_files) > 0:
-    #     layover_binary_mask_files = create_layover_shadow_masks(
-    #         cslc_static_files=cfg.correction_options.geometry_files,
-    #         output_dir=cfg.work_directory / "layover_shadow_masks",
-    #     )
-    #     cfg.layover_shadow_mask_files = layover_binary_mask_files
+    # Build a layover/shadow mask from the GSLC radarGrid datacubes + DEM.
+    # This replaces the OPERA-CSLC nodata-mask path (which doesn't apply to
+    # NISAR) and gives wrapped_phase a real per-frame mask.
+    dem_file = pge_runconfig.dynamic_ancillary_file_group.dem_file
+    if dem_file is not None and not cfg.layover_shadow_mask_files:
+        from disp_nisar._geometry import prepare_geometry_layers
+
+        first_non_compressed = next(
+            (f for f in cfg.cslc_file_list if "compressed" not in f.name.lower()),
+            cfg.cslc_file_list[0],
+        )
+        geometry_dir = cfg.work_directory / "geometry"
+        try:
+            template_raster = _build_frame_template(
+                first_non_compressed,
+                frequency=pge_runconfig.input_file_group.frequency
+                if isinstance(pge_runconfig.input_file_group.frequency, str)
+                else pge_runconfig.input_file_group.frequency.value,
+                output_path=geometry_dir / "frame_template.tif",
+            )
+            geometry_layers = prepare_geometry_layers(
+                gslc_path=first_non_compressed,
+                dem_path=dem_file,
+                output_dir=geometry_dir,
+                template_raster=template_raster,
+                n_workers=cfg.worker_settings.n_parallel_bursts or 4,
+            )
+            cfg.layover_shadow_mask_files = [geometry_layers["layover_shadow_mask"]]
+            logger.info(
+                "Layover/shadow mask:"
+                f" {geometry_layers['layover_shadow_mask']}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to prepare layover/shadow mask: {e}; continuing without it"
+            )
+    elif dem_file is None:
+        logger.info(
+            "No DEM provided in dynamic_ancillary_file_group; skipping layover/shadow"
+            " mask generation"
+        )
 
     if any("compressed" in f.name.lower() for f in cfg.cslc_file_list):
         # If we are passed Compressed SLCs, combine the old amplitudes with the
@@ -408,6 +442,57 @@ def _filter_before_last_processed(
             p for p in cur_files if get_dates(p)[1] > (last_processed + time_buffer)
         ]
     return OutputPaths(**out_dict)
+
+
+def _build_frame_template(
+    gslc_path: Path,
+    frequency: str,
+    output_path: Path,
+) -> Path:
+    """Write a sparse GeoTIFF matching the NISAR GSLC frame for use as a template.
+
+    ``prepare_geometry_layers`` needs a raster that defines the target CRS,
+    bounds, and full-frame shape. NISAR GSLCs don't ship one, so we build it
+    from the HDF5 grid metadata. ``SPARSE_OK=YES`` means GDAL records only
+    the metadata — no pixel storage is allocated.
+    """
+    import h5py
+    from osgeo import gdal, osr
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        return output_path
+
+    with h5py.File(gslc_path, "r") as f:
+        grid = f[f"science/LSAR/GSLC/grids/{frequency}"]
+        x = grid["xCoordinates"][:]
+        y = grid["yCoordinates"][:]
+        dx = float(grid["xCoordinateSpacing"][()])
+        dy = float(grid["yCoordinateSpacing"][()])
+        epsg = int(grid["projection"].attrs["epsg_code"])
+
+    nx, ny = len(x), len(y)
+    left = float(x.min()) - abs(dx) / 2
+    top = float(y.max()) + abs(dy) / 2
+    gt = (left, abs(dx), 0.0, top, 0.0, -abs(dy))
+
+    drv = gdal.GetDriverByName("GTiff")
+    ds = drv.Create(
+        str(output_path),
+        nx,
+        ny,
+        1,
+        gdal.GDT_Byte,
+        options=["COMPRESS=LZW", "SPARSE_OK=YES", "TILED=YES", "BIGTIFF=YES"],
+    )
+    ds.SetGeoTransform(gt)
+    sr = osr.SpatialReference()
+    sr.ImportFromEPSG(epsg)
+    ds.SetProjection(sr.ExportToWkt())
+    ds.FlushCache()
+    ds = None
+    return output_path
 
 
 def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:

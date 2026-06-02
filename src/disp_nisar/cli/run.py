@@ -10,10 +10,21 @@ def run_main(config_file: str, debug: bool = False) -> None:
     _disable_gpu_early(config_file)
 
     # rest of imports here so --help doesn't take forever
+    from opera_utils import is_remote_url
+
     from disp_nisar.main import run
     from disp_nisar.pge_runconfig import RunConfig
 
     pge_runconfig = RunConfig.from_yaml(config_file)
+
+    # If any inputs are remote URLs, stage them locally first to avoid
+    # GDAL/HDF5 driver authentication issues with NASA Earthdata HTTPS.
+    if any(is_remote_url(f) for f in pge_runconfig.input_file_group.gslc_file_list):
+        from disp_nisar._remote_input import run_dolphin_with_earthaccess
+
+        run_dolphin_with_earthaccess(config_file=config_file, debug=debug)
+        return
+
     cfg = pge_runconfig.to_workflow()
     run(cfg, pge_runconfig=pge_runconfig, debug=debug)
 

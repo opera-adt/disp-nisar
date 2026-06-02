@@ -1535,10 +1535,14 @@ def _create_metadata_group(
 
 def _get_orbit_direction(cslc_filename: Filename) -> Literal["ascending", "descending"]:
     with open_h5_file(cslc_filename) as hf:
-        out = hf["/identification/orbit_pass_direction"][()]
+        # NISAR path; fall back to the legacy OPERA-CSLC path for old fixtures.
+        if "/science/LSAR/identification/orbitPassDirection" in hf:
+            out = hf["/science/LSAR/identification/orbitPassDirection"][()]
+        else:
+            out = hf["/identification/orbit_pass_direction"][()]
         if isinstance(out, bytes):
             out = out.decode("utf-8")
-    return out
+    return out.lower()
 
 
 def _get_orbit_type(
