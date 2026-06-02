@@ -71,66 +71,47 @@ def create_mask_from_distance(
 def convert_distance_to_binary(
     water_distance_data: np.ma.MaskedArray, land_buffer: int = 0, ocean_buffer: int = 0
 ) -> np.ndarray:
-    """Convert water distance data to a binary land/water mask.
-
-    Auto-detects the input convention. Two formats are supported:
-
-    A. **OPERA distance** (UInt8): ``0`` = land, ``1–99`` = ocean (km to shore),
-       ``100–200`` = inland water (km to land).
-    B. **Distance-from-water** (UInt8): ``0`` = water, ``1+`` = land (km to
-       water, often capped at 100). This is the convention used by some NISAR
-       ancillary water masks.
-
-    Detection heuristic: if more than ~15% of valid pixels are ≥100 (the
-    "capped" land tail in convention B), input is treated as convention B;
-    otherwise OPERA convention is assumed.
+    """Convert water distance data to a binary mask considering buffer zones.
 
     Parameters
     ----------
     water_distance_data : np.ma.MaskedArray
         Input water distance data as a masked array.
     land_buffer : int, optional
-        Buffer (in km) for land. Pixels closer than ``land_buffer`` to water
-        are treated as water. Default 0.
+        Buffer distance (in km) for land pixels. Only pixels this far or farther
+        from water will be considered land. Default is 0.
     ocean_buffer : int, optional
-        Buffer (in km) for ocean (OPERA convention only). Pixels closer than
-        ``ocean_buffer`` km to shore are treated as land. Default 0.
+        Buffer distance (in km) for ocean pixels. Only pixels this far or farther
+        from land will be considered water. Default is 0.
 
     Returns
     -------
     np.ndarray
-        Binary mask where ``True`` (1) = land/valid and ``False`` (0) = water.
+        Binary mask where True represents land pixels and False represents water pixels.
 
+    Notes
+    -----
+    The function applies the following logic:
+    - Starts with all pixels as land (True).
+    - Masks inland water pixels as water (False) if they are farther from land
+        than the land_buffer.
+    - Masks ocean pixels as water (False) if they are farther from shore than
+        `ocean_buffer`.
     """
-    valid_values = water_distance_data.compressed()
-    if valid_values.size == 0:
-        return np.zeros(water_distance_data.shape, dtype=bool)
+    # Create the binary mask with buffer considerations. Start all on (assume all land)
+    binary_mask = np.ma.MaskedArray(
+        np.ones_like(water_distance_data, dtype=bool), mask=water_distance_data.mask
+    )
 
-    pct_high = float((valid_values >= 100).mean())
-    convention_b = pct_high > 0.15
-
-    if convention_b:
-        # 0 = water; positive = distance-from-water (land).
-        # Treat pixels closer than land_buffer to water as water.
-        is_land = water_distance_data > max(land_buffer, 0)
-        binary_mask = np.ma.MaskedArray(
-            np.asarray(is_land, dtype=bool),
-            mask=water_distance_data.mask,
-        )
-    else:
-        # OPERA convention: 0 = land, 1-99 = ocean, 100-200 = inland water.
-        binary_mask = np.ma.MaskedArray(
-            np.ones_like(water_distance_data, dtype=bool),
-            mask=water_distance_data.mask,
-        )
-        # Inland water (101–200, considering land buffer)
-        binary_mask[water_distance_data > land_buffer + 100] = False
-        # Ocean water (1–100, considering ocean buffer)
-        binary_mask[
-            (water_distance_data <= 100) & (water_distance_data > ocean_buffer)
-        ] = False
-
-    # Close small holes inside land regions.
+    # Mask inland water pixels (considering land buffer): anything 101 or higher is land
+    inland_water_mask = water_distance_data > land_buffer + 100
+    binary_mask[inland_water_mask] = False
+    # For ocean, only look at values 1-100, then consider buffer
+    ocean_water_mask = (water_distance_data <= 100) & (
+        water_distance_data > ocean_buffer
+    )
+    binary_mask[ocean_water_mask] = False
+    # Erode away small single-pixels
     closed_mask = ndimage.binary_closing(
         binary_mask.filled(0), structure=np.ones((3, 3)), border_value=1
     )
