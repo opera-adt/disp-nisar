@@ -19,6 +19,7 @@ from dolphin.workflows.config import DisplacementWorkflow
 from dolphin.workflows.displacement import OutputPaths
 from dolphin.workflows.displacement import run as run_displacement
 from opera_utils import get_dates, group_by_date
+from opera_utils.nisar import get_gslc_mask
 
 from disp_nisar import __version__, product
 from disp_nisar._masking import (
@@ -133,8 +134,7 @@ def run(
             )
             cfg.layover_shadow_mask_files = [geometry_layers["layover_shadow_mask"]]
             logger.info(
-                "Layover/shadow mask:"
-                f" {geometry_layers['layover_shadow_mask']}"
+                f"Layover/shadow mask: {geometry_layers['layover_shadow_mask']}"
             )
         except Exception as e:
             logger.warning(
@@ -272,6 +272,35 @@ def create_products(
         )
 
     combined_mask_file = cfg.work_directory / "combined_water_nodata_mask.tif"
+
+    # Get GSLC mask from the first non-compressed CSLC file
+    first_non_compressed = next(
+        (f for f in cfg.cslc_file_list if "compressed" not in f.name.lower()),
+        cfg.cslc_file_list[0],
+    )
+    gslc_mask_file = cfg.work_directory / "gslc_mask.tif"
+    gslc_mask_warped = cfg.work_directory / "gslc_mask_warped.tif"
+
+    try:
+        logger.info(f"Creating GSLC mask from {first_non_compressed}")
+        gslc_mask = get_gslc_mask(
+            first_non_compressed,
+            frequency=pge_runconfig.input_file_group.frequency
+            if isinstance(pge_runconfig.input_file_group.frequency, str)
+            else pge_runconfig.input_file_group.frequency.value,
+        )
+        # Save the xarray DataArray as GeoTIFF
+        gslc_mask.rio.to_raster(gslc_mask_file, compress="LZW")
+        # Warp to match the output UTM files
+        stitching.warp_to_match(
+            input_file=gslc_mask_file,
+            match_file=out_paths.timeseries_paths[0],
+            output_file=gslc_mask_warped,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
+        gslc_mask_warped = None
+
     if pge_runconfig.dynamic_ancillary_file_group.mask_file:
         matching_water_binary_mask = (
             cfg.work_directory / "water_binary_mask_nobuffer.tif"
@@ -285,23 +314,48 @@ def create_products(
             land_buffer=0,
             ocean_buffer=0,
         )
-        # Then need to warp to match the output UTM files
         # Warp to match the output UTM files
         stitching.warp_to_match(
             input_file=tmp_outfile,
             match_file=out_paths.timeseries_paths[0],
             output_file=matching_water_binary_mask,
         )
-        create_combined_mask(
-            mask_filename=matching_water_binary_mask,
-            image_filename=out_paths.timeseries_paths[0],
-            output_filename=combined_mask_file,
-        )
+
+        # Combine masks: water + GSLC + nodata
+        if gslc_mask_warped is not None:
+            # First combine water mask with nodata
+            water_nodata_mask = cfg.work_directory / "water_nodata_mask.tif"
+            create_combined_mask(
+                mask_filename=matching_water_binary_mask,
+                image_filename=out_paths.timeseries_paths[0],
+                output_filename=water_nodata_mask,
+            )
+            # Then combine with GSLC mask
+            create_combined_mask(
+                mask_filename=gslc_mask_warped,
+                image_filename=water_nodata_mask,
+                output_filename=combined_mask_file,
+            )
+        else:
+            create_combined_mask(
+                mask_filename=matching_water_binary_mask,
+                image_filename=out_paths.timeseries_paths[0],
+                output_filename=combined_mask_file,
+            )
     else:
         matching_water_binary_mask = None
-        _create_nodata_mask(
-            filename=out_paths.timeseries_paths[0], output_filename=combined_mask_file
-        )
+        # If we only have GSLC mask (no water mask)
+        if gslc_mask_warped is not None:
+            create_combined_mask(
+                mask_filename=gslc_mask_warped,
+                image_filename=out_paths.timeseries_paths[0],
+                output_filename=combined_mask_file,
+            )
+        else:
+            _create_nodata_mask(
+                filename=out_paths.timeseries_paths[0],
+                output_filename=combined_mask_file,
+            )
 
     ## TODO: remove stitched from naming in run_displacement
     # Check and update correlation paths
