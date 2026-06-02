@@ -579,8 +579,8 @@ def _compute_layover_shadow_mask(
     # Combine: any pixel with layover or shadow is masked (0)
     bad_pixels = is_shadow | is_layover
 
-    # Good pixels = 1, bad = 0
-    mask = (~bad_pixels).astype(np.uint8)
+    # Good pixels = 0, bad = 1
+    mask = (bad_pixels).astype(np.uint8)
 
     # Handle NaN in incidence angle
     mask[np.isnan(incidence_angle)] = 0
