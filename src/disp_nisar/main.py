@@ -91,19 +91,72 @@ def run(
                 second_to_last_date + timedelta(days=1)
             )
 
-    # Setup the binary mask as dolphin expects
+    # Get the first non-compressed CSLC file for mask generation
+    first_non_compressed = next(
+        (f for f in cfg.cslc_file_list if "compressed" not in f.name.lower()),
+        cfg.cslc_file_list[0],
+    )
+
+    # Create GSLC mask first (in native GSLC CRS - UTM)
+    gslc_mask_file = cfg.work_directory / "gslc_mask.tif"
+
+    try:
+        logger.info(f"Creating GSLC mask from {first_non_compressed}")
+        gslc_mask = get_gslc_mask(
+            first_non_compressed,
+            frequency=(
+                pge_runconfig.input_file_group.frequency
+                if isinstance(pge_runconfig.input_file_group.frequency, str)
+                else pge_runconfig.input_file_group.frequency.value
+            ),
+        )
+        # Save the xarray DataArray as GeoTIFF in native GSLC CRS
+        gslc_mask.rio.to_raster(gslc_mask_file, compress="LZW")
+        logger.info(f"GSLC mask created at {gslc_mask_file} in native CRS")
+    except Exception as e:
+        logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
+        gslc_mask_file = None
+
+    # Setup the water mask and warp to match GSLC CRS
     if pge_runconfig.dynamic_ancillary_file_group.mask_file:
-        water_binary_mask = cfg.work_directory / "water_binary_mask.tif"
+        water_binary_mask_latlon = cfg.work_directory / "water_binary_mask_latlon.tif"
         create_mask_from_distance(
             water_distance_file=pge_runconfig.dynamic_ancillary_file_group.mask_file,
-            output_file=water_binary_mask,
+            output_file=water_binary_mask_latlon,
             # Set a little conservative for the general processing
             land_buffer=1,
             ocean_buffer=1,
         )
-        cfg.mask_file = water_binary_mask
+
+        # Warp water mask to match GSLC CRS if GSLC mask exists
+        if gslc_mask_file is not None:
+            water_binary_mask = cfg.work_directory / "water_binary_mask.tif"
+            logger.info("Warping water mask to match GSLC native CRS")
+            stitching.warp_to_match(
+                input_file=water_binary_mask_latlon,
+                match_file=gslc_mask_file,
+                output_file=water_binary_mask,
+            )
+        else:
+            water_binary_mask = water_binary_mask_latlon
     else:
         water_binary_mask = None
+
+    # Combine masks for unwrapping (both in GSLC native CRS)
+    if water_binary_mask is not None and gslc_mask_file is not None:
+        combined_mask_file = cfg.work_directory / "water_gslc_combined_mask.tif"
+        logger.info("Combining water mask and GSLC mask for unwrapping")
+        create_combined_mask(
+            mask_filename=gslc_mask_file,
+            image_filename=water_binary_mask,
+            output_filename=combined_mask_file,
+        )
+        cfg.mask_file = combined_mask_file
+    elif water_binary_mask is not None:
+        cfg.mask_file = water_binary_mask
+    elif gslc_mask_file is not None:
+        cfg.mask_file = gslc_mask_file
+        logger.info("Using GSLC mask for unwrapping")
 
     # Build a layover/shadow mask from the GSLC radarGrid datacubes + DEM.
     # This replaces the OPERA-CSLC nodata-mask path (which doesn't apply to
@@ -112,17 +165,15 @@ def run(
     if dem_file is not None and not cfg.layover_shadow_mask_files:
         from disp_nisar._geometry import prepare_geometry_layers
 
-        first_non_compressed = next(
-            (f for f in cfg.cslc_file_list if "compressed" not in f.name.lower()),
-            cfg.cslc_file_list[0],
-        )
         geometry_dir = cfg.work_directory / "geometry"
         try:
             template_raster = _build_frame_template(
                 first_non_compressed,
-                frequency=pge_runconfig.input_file_group.frequency
-                if isinstance(pge_runconfig.input_file_group.frequency, str)
-                else pge_runconfig.input_file_group.frequency.value,
+                frequency=(
+                    pge_runconfig.input_file_group.frequency
+                    if isinstance(pge_runconfig.input_file_group.frequency, str)
+                    else pge_runconfig.input_file_group.frequency.value
+                ),
                 output_path=geometry_dir / "frame_template.tif",
             )
             geometry_layers = prepare_geometry_layers(
@@ -285,9 +336,11 @@ def create_products(
         logger.info(f"Creating GSLC mask from {first_non_compressed}")
         gslc_mask = get_gslc_mask(
             first_non_compressed,
-            frequency=pge_runconfig.input_file_group.frequency
-            if isinstance(pge_runconfig.input_file_group.frequency, str)
-            else pge_runconfig.input_file_group.frequency.value,
+            frequency=(
+                pge_runconfig.input_file_group.frequency
+                if isinstance(pge_runconfig.input_file_group.frequency, str)
+                else pge_runconfig.input_file_group.frequency.value
+            ),
         )
         # Save the xarray DataArray as GeoTIFF
         gslc_mask.rio.to_raster(gslc_mask_file, compress="LZW")

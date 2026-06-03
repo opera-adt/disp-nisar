@@ -13,7 +13,6 @@ full download. Net effect: fast network transfer + small final disk usage.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -137,7 +136,7 @@ def _download_and_trim(
     tmp = final.with_suffix(final.suffix + ".part")
     logger.info(f"Extracting {polarization}@{frequency} from {fname}")
     _extract_subset(raw, tmp, frequency, polarization)
-    os.replace(tmp, final)
+    tmp.replace(final)
 
     # Free disk: drop the full granule once the trimmed copy is in place.
     try:

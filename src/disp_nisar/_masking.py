@@ -97,6 +97,7 @@ def convert_distance_to_binary(
         than the land_buffer.
     - Masks ocean pixels as water (False) if they are farther from shore than
         `ocean_buffer`.
+
     """
     # Create the binary mask with buffer considerations. Start all on (assume all land)
     binary_mask = np.ma.MaskedArray(

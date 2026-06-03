@@ -1,4 +1,3 @@
-import h5py
 import isce3
 import numpy as np
 from dolphin import baseline

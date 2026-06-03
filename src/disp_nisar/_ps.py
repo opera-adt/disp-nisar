@@ -86,10 +86,13 @@ def run_frame_ps(cfg: DisplacementWorkflow) -> tuple[Path, Path]:
 
         # Get halo size from phase_linking half_window if available
         # This is used for operations that need neighboring pixels
-        if hasattr(cfg, 'phase_linking') and hasattr(cfg.phase_linking, 'half_window'):
+        if hasattr(cfg, "phase_linking") and hasattr(cfg.phase_linking, "half_window"):
             halo_rows = cfg.phase_linking.half_window.y
             halo_cols = cfg.phase_linking.half_window.x
-            logger.info(f"Using halo from phase_linking.half_window: row={halo_rows}, col={halo_cols}")
+            logger.info(
+                f"Using halo from phase_linking.half_window: row={halo_rows},"
+                f" col={halo_cols}"
+            )
         else:
             halo_rows = 0
             halo_cols = 0
@@ -119,7 +122,9 @@ def run_frame_ps(cfg: DisplacementWorkflow) -> tuple[Path, Path]:
     )
 
     # For remote files, XarrayStackReader doesn't have an outfile, so use first file
-    like_file = vrt_stack.outfile if hasattr(vrt_stack, 'outfile') else non_compressed_slcs[0]
+    like_file = (
+        vrt_stack.outfile if hasattr(vrt_stack, "outfile") else non_compressed_slcs[0]
+    )
 
     mask_filename = _get_mask(
         output_dir=cfg.work_directory,

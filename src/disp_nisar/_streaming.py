@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import h5py
 import numpy as np
@@ -181,7 +181,10 @@ def open_xarray_group(
 
     """
     if not HAS_EARTHACCESS:
-        msg = "earthaccess and xarray required. Install with: pip install earthaccess xarray h5netcdf"
+        msg = (
+            "earthaccess and xarray required. Install with: pip install earthaccess"
+            " xarray h5netcdf"
+        )
         raise ImportError(msg)
 
     import xarray as xr
@@ -387,9 +390,9 @@ class XarrayStackReader:
 
         # JAX configuration
         os.environ["XLA_FLAGS"] = (
-            f"--xla_cpu_multi_thread_eigen=true "
+            "--xla_cpu_multi_thread_eigen=true "
             f"intra_op_parallelism_threads={threads_per_worker} "
-            f"inter_op_parallelism_threads=1"
+            "inter_op_parallelism_threads=1"
         )
 
         # NumPy/BLAS threading (used by JAX backend)
@@ -416,7 +419,8 @@ class XarrayStackReader:
 
                 client = get_client()
                 logger.info(
-                    f"Using existing dask client with {len(client.cluster.workers)} workers"
+                    f"Using existing dask client with {len(client.cluster.workers)}"
+                    " workers"
                 )
             except ValueError:
                 # No client exists, create one
@@ -545,7 +549,9 @@ class XarrayStackReader:
         >>> def process_block(block):
         ...     # Your processing with neighboring pixels
         ...     return block * 1.0  # doctest: +SKIP
-        >>> result = reader.map_overlap(process_block, depth={0: 0, 1: 200, 2: 0})  # doctest: +SKIP
+        >>> result = reader.map_overlap(
+        ...     process_block, depth={0: 0, 1: 200, 2: 0}
+        ... )  # doctest: +SKIP
 
         """
         import dask.array as da
@@ -648,7 +654,7 @@ class StreamingFileManager:
             authenticate_earthdata()
             self._authenticated = True
 
-    def __enter__(self) -> "StreamingFileManager":
+    def __enter__(self) -> Self:
         """Enter the context manager."""
         return self
 

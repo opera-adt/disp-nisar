@@ -6,7 +6,6 @@ import logging
 from datetime import date
 from pathlib import Path
 
-import h5py
 import numpy as np
 from dolphin import io
 from dolphin.utils import full_suffix
