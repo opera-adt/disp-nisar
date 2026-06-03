@@ -26,7 +26,6 @@ from disp_nisar._masking import (
     create_mask_from_distance,  # , create_layover_shadow_masks
 )
 from disp_nisar._ps import precompute_ps
-from disp_nisar._streaming import open_h5_file
 from disp_nisar.ionosphere import read_ionosphere_phase_screen
 from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
@@ -35,6 +34,7 @@ from ._utils import (
     _convert_meters_to_radians,
     _create_correlation_images,
     _frequency_to_wavelength,
+    _intersect_masks,
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
 )
@@ -110,8 +110,16 @@ def run(
                 else pge_runconfig.input_file_group.frequency.value
             ),
         )
+        strides_dict = cfg.output_options.strides.model_dump()
+        gslc_mask_strided = gslc_mask.isel(
+            y=slice(None, None, strides_dict["y"]),
+            x=slice(None, None, strides_dict["x"]),
+        )
+        del gslc_mask
         # Save the xarray DataArray as GeoTIFF in native GSLC CRS
-        gslc_mask.rio.to_raster(gslc_mask_file, compress="LZW")
+        gslc_mask_strided.rio.to_raster(
+            gslc_mask_file, compress="LZW", tiled=True, blockxsize=256, blockysize=256
+        )
         logger.info(f"GSLC mask created at {gslc_mask_file} in native CRS")
     except Exception as e:
         logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
@@ -146,14 +154,14 @@ def run(
     if water_binary_mask is not None and gslc_mask_file is not None:
         combined_mask_file = cfg.work_directory / "water_gslc_combined_mask.tif"
         logger.info("Combining water mask and GSLC mask for unwrapping")
-        create_combined_mask(
-            mask_filename=gslc_mask_file,
-            image_filename=water_binary_mask,
+        _intersect_masks(
+            mask_filenames=[gslc_mask_file, water_binary_mask],
             output_filename=combined_mask_file,
         )
         cfg.mask_file = combined_mask_file
     elif water_binary_mask is not None:
         cfg.mask_file = water_binary_mask
+        logger.info("Using water mask for unwrapping")
     elif gslc_mask_file is not None:
         cfg.mask_file = gslc_mask_file
         logger.info("Using GSLC mask for unwrapping")
@@ -184,6 +192,11 @@ def run(
                 n_workers=cfg.worker_settings.n_parallel_bursts or 4,
             )
             cfg.layover_shadow_mask_files = [geometry_layers["layover_shadow_mask"]]
+            cfg.correction_options.geometry_files = [
+                geometry_layers["incidence_angle"],
+                geometry_layers["los_east"],
+                geometry_layers["los_north"],
+            ]
             logger.info(
                 f"Layover/shadow mask: {geometry_layers['layover_shadow_mask']}"
             )
@@ -298,13 +311,10 @@ def create_products(
     ref_point = read_reference_point(out_paths.timeseries_paths[0].parent)
 
     # Find the geometry files, if created
-    los_east_file: Path | None
-    los_north_file: Path | None
-    try:
-        los_east_file = next(cfg.work_directory.rglob("los_east.tif"))
-        assert los_east_file is not None
-        los_north_file = los_east_file.parent / "los_north.tif"
-    except StopIteration:
+    if len(cfg.correction_options.geometry_files) > 0:
+        los_east_file = cfg.correction_options.geometry_files[1]
+        los_north_file = cfg.correction_options.geometry_files[2]
+    else:
         los_east_file = los_north_file = None
 
     # Finalize the output as an HDF5 product
@@ -324,87 +334,31 @@ def create_products(
 
     combined_mask_file = cfg.work_directory / "combined_water_nodata_mask.tif"
 
-    # Get GSLC mask from the first non-compressed CSLC file
-    first_non_compressed = next(
-        (f for f in cfg.cslc_file_list if "compressed" not in f.name.lower()),
-        cfg.cslc_file_list[0],
-    )
-    gslc_mask_file = cfg.work_directory / "gslc_mask.tif"
-    gslc_mask_warped = cfg.work_directory / "gslc_mask_warped.tif"
+    water_gslc_mask_file = cfg.work_directory / "water_gslc_combined_mask.tif"
+    water_gslc_mask_warped = cfg.work_directory / "water_gslc_combined_mask_warped.tif"
 
     try:
-        logger.info(f"Creating GSLC mask from {first_non_compressed}")
-        gslc_mask = get_gslc_mask(
-            first_non_compressed,
-            frequency=(
-                pge_runconfig.input_file_group.frequency
-                if isinstance(pge_runconfig.input_file_group.frequency, str)
-                else pge_runconfig.input_file_group.frequency.value
-            ),
-        )
-        # Save the xarray DataArray as GeoTIFF
-        gslc_mask.rio.to_raster(gslc_mask_file, compress="LZW")
         # Warp to match the output UTM files
         stitching.warp_to_match(
-            input_file=gslc_mask_file,
+            input_file=water_gslc_mask_file,
             match_file=out_paths.timeseries_paths[0],
-            output_file=gslc_mask_warped,
+            output_file=water_gslc_mask_warped,
         )
     except Exception as e:
         logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
-        gslc_mask_warped = None
+        water_gslc_mask_warped = None
 
     if pge_runconfig.dynamic_ancillary_file_group.mask_file:
-        matching_water_binary_mask = (
-            cfg.work_directory / "water_binary_mask_nobuffer.tif"
-        )
-        tmp_outfile = matching_water_binary_mask.with_suffix(".temp.tif")
-        create_mask_from_distance(
-            water_distance_file=pge_runconfig.dynamic_ancillary_file_group.mask_file,
-            # Make the file in lat/lon
-            output_file=tmp_outfile,
-            # Give no buffer around the water
-            land_buffer=0,
-            ocean_buffer=0,
-        )
-        # Warp to match the output UTM files
-        stitching.warp_to_match(
-            input_file=tmp_outfile,
-            match_file=out_paths.timeseries_paths[0],
-            output_file=matching_water_binary_mask,
-        )
-
         # Combine masks: water + GSLC + nodata
-        if gslc_mask_warped is not None:
-            # First combine water mask with nodata
-            water_nodata_mask = cfg.work_directory / "water_nodata_mask.tif"
-            create_combined_mask(
-                mask_filename=matching_water_binary_mask,
-                image_filename=out_paths.timeseries_paths[0],
-                output_filename=water_nodata_mask,
-            )
-            # Then combine with GSLC mask
-            create_combined_mask(
-                mask_filename=gslc_mask_warped,
-                image_filename=water_nodata_mask,
-                output_filename=combined_mask_file,
-            )
-        else:
+        matching_water_binary_mask = water_gslc_mask_warped
+        if water_gslc_mask_warped is not None:
             create_combined_mask(
                 mask_filename=matching_water_binary_mask,
                 image_filename=out_paths.timeseries_paths[0],
                 output_filename=combined_mask_file,
             )
-    else:
-        matching_water_binary_mask = None
-        # If we only have GSLC mask (no water mask)
-        if gslc_mask_warped is not None:
-            create_combined_mask(
-                mask_filename=gslc_mask_warped,
-                image_filename=out_paths.timeseries_paths[0],
-                output_filename=combined_mask_file,
-            )
         else:
+            matching_water_binary_mask = None
             _create_nodata_mask(
                 filename=out_paths.timeseries_paths[0],
                 output_filename=combined_mask_file,
@@ -455,11 +409,9 @@ def create_products(
             )
 
     # Get the incidence angles for /identification metadata
-    # TODO: There is no geometry files, all are included in the data as
-    # radar grid datacube
     if len(cfg.correction_options.geometry_files) > 0:
         near_far_incidence_angles = _get_near_far_incidence_angles(
-            cfg.correction_options.geometry_files
+            cfg.correction_options.geometry_files[0]
         )
     else:
         logger.warning("Using approximate incidence angles")
@@ -618,18 +570,13 @@ def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:
         raise ValueError(msg)
 
 
-def _get_near_far_incidence_angles(geometry_files: list[Path]) -> tuple[float, float]:
+def _get_near_far_incidence_angles(geometry_file: Path) -> tuple[float, float]:
     import numpy as np
 
-    ##TODO: min and max of incidence angle in the data in radar grid
+    incidence_angle = io.load_gdal(geometry_file, masked=True)
 
-    with open_h5_file(geometry_files[0]) as ds:
-        incidence_angles = ds["/science/LSAR/GUNW/metadata/radarGrid/incidenceAngle"][
-            ()
-        ]
-
-    near_incidence = np.nanmin(incidence_angles).round(1)
-    far_incidence = np.nanmax(incidence_angles).round(1)
+    near_incidence = np.nanmin(incidence_angle).round(1)
+    far_incidence = np.nanmax(incidence_angle).round(1)
 
     return near_incidence, far_incidence
 

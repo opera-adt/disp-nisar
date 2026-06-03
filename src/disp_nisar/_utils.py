@@ -369,3 +369,49 @@ def _frequency_to_wavelength(frequency: str, gslc_file: Filename) -> float:
         center_frequency = _get_dset_and_attrs(filename=file_str, dset_name=dset)[0]
     wavelength = SPEED_OF_LIGHT / center_frequency
     return wavelength
+
+
+def _intersect_masks(
+    mask_filenames: list[Filename],
+    output_filename: Filename | None = None,
+) -> Path:
+    """Create an intersect mask from `mask_filenames`.
+
+    Parameters
+    ----------
+    mask_filenames : list[PathOrStr]`
+        The file path of the existing mask files. This masks specifies pixels that
+        are valid (1) or invalid (0).
+    output_filename : PathOrStr, optional, default=None
+        The file path where the combined mask will be saved.
+        If None, creates "combined_mask.tif" in the same directory as `mask_filename`
+
+    Returns
+    -------
+    Path
+        The path to the created intersected mask file.
+
+    """
+    if not mask_filenames:
+        raise ValueError("The list of mask filenames cannot be empty.")
+
+    # Resolve input paths
+    input_paths = [Path(f) for f in mask_filenames]
+
+    # Read and intersect masks
+    combined_mask = None
+
+    for mask_filename in input_paths:
+        mask_data = io.load_gdal(mask_filename).astype(bool)
+        # Logical AND operation
+        if combined_mask is not None:
+            combined_mask = combined_mask & mask_data
+        else:
+            combined_mask = mask_data
+
+    if output_filename is None:
+        output_filename = Path(mask_filename).parent / "combined_mask.tif"
+    io.write_arr(
+        like_filename=mask_filename, arr=combined_mask, output_name=output_filename
+    )
+    return Path(output_filename)
