@@ -328,10 +328,61 @@ def create_mask_from_distance(
     logger.info(f"Binary mask created: {output_file}")
 
 
+def warp_mask_to_gslc_grid(
+    mask_file: Path,
+    gslc_file: Path,
+    output_file: Path,
+    frequency: str = "frequencyA",
+) -> Path:
+    """Reproject a water mask TIF to match a GSLC file's UTM grid.
+
+    Parameters
+    ----------
+    mask_file : Path
+        Binary water mask in EPSG:4326 produced by :func:`create_mask_from_distance`.
+    gslc_file : Path
+        NISAR GSLC HDF5 file whose grid defines the target CRS, extent, and spacing.
+    output_file : Path
+        Destination path for the reprojected mask.
+    frequency : str, optional
+        GSLC frequency band to read grid parameters from. Default: ``"frequencyA"``.
+
+    Returns
+    -------
+    Path
+        Path to the reprojected mask (same as ``output_file``).
+
+    """
+    from disp_nisar._utils import get_nisar_frame_bbox, gslc_pixel_spacing
+
+    epsg, utm_bbox = get_nisar_frame_bbox(gslc_file, frequency=frequency)
+    y_spacing, x_spacing = gslc_pixel_spacing(gslc_file, frequency=frequency)
+
+    logger.info(
+        f"Warping mask to EPSG:{epsg}, "
+        f"bounds={utm_bbox}, resolution=({x_spacing}, {y_spacing}) m"
+    )
+
+    options = gdal.WarpOptions(
+        dstSRS=f"EPSG:{epsg}",
+        format="GTiff",
+        xRes=x_spacing,
+        yRes=abs(y_spacing),
+        outputBounds=(utm_bbox.left, utm_bbox.bottom, utm_bbox.right, utm_bbox.top),
+        outputBoundsSRS=f"EPSG:{epsg}",
+        resampleAlg="near",
+        creationOptions=["COMPRESS=LZW"],
+    )
+    gdal.Warp(str(output_file), str(mask_file), options=options)
+    logger.info(f"Warped mask written to {output_file}")
+    return output_file
+
+
 def create_water_mask(
     frame_id: int | None = None,
     bbox: tuple[float, float, float, float] | None = None,
-    output: Path = Path("water_binary_mask.vrt"),
+    gslc_file: Path | None = None,
+    output: Path = Path("water_binary_mask.tif"),
     margin: int = 5,
     land_buffer: int = 1,
     ocean_buffer: int = 1,
@@ -341,8 +392,8 @@ def create_water_mask(
 ) -> None:
     """Create a binary water mask for a geographic region.
 
-    Either frame_id or bbox must be provided. For NISAR, bbox is typically used
-    since frame geometry is different from Sentinel-1.
+    One of frame_id, bbox, or gslc_file must be provided.
+    When gslc_file is given the output is reprojected to match the GSLC UTM grid.
 
     Parameters
     ----------
@@ -350,8 +401,11 @@ def create_water_mask(
         Frame ID to create mask for (uses opera_utils to get bbox)
     bbox : tuple[float, float, float, float], optional
         Bounding box as (West, South, East, North) in decimal degrees
+    gslc_file : Path, optional
+        Path to a NISAR GSLC HDF5 file; bbox is extracted from its grid extent
+        and the output mask is warped to the GSLC UTM grid.
     output : Path, optional
-        Output binary mask file path, by default "water_binary_mask.vrt"
+        Output binary mask file path, by default "water_binary_mask.tif"
     margin : int, optional
         Margin in kilometers to add to region, by default 5
     land_buffer : int, optional
@@ -368,7 +422,7 @@ def create_water_mask(
     Raises
     ------
     ValueError
-        If neither frame_id nor bbox is provided
+        If none of frame_id, bbox, or gslc_file is provided
     RuntimeError
         If S3 data cannot be accessed
 
@@ -380,11 +434,20 @@ def create_water_mask(
     set_aws_env_from_saml(profile_name=aws_profile, region=aws_region)
 
     # Validate inputs
-    if frame_id is None and bbox is None:
-        raise ValueError("Must provide either frame_id or bbox")
+    if frame_id is None and bbox is None and gslc_file is None:
+        raise ValueError("Must provide one of: frame_id, bbox, or gslc_file")
+
+    # Get bounding box from GSLC file (lon/lat for download; UTM for final warp)
+    if gslc_file is not None:
+        from opera_utils.nisar._info import get_nisar_bbox
+
+        logger.info(f"Extracting bbox from GSLC file: {gslc_file}")
+        nisar_bbox = get_nisar_bbox(gslc_file)
+        bbox = (nisar_bbox.left, nisar_bbox.bottom, nisar_bbox.right, nisar_bbox.top)
+        logger.info(f"GSLC extent (WSEN lon/lat): {bbox}")
 
     # Get bounding box from frame if needed
-    if frame_id is not None:
+    elif frame_id is not None:
         try:
             import opera_utils
 
@@ -403,7 +466,7 @@ def create_water_mask(
     logger.info(f"Using S3 data from: {MASK_S3_URL}")
 
     # Create polygon from bounding box
-    assert bbox is not None  # bbox is guaranteed to be set by now
+    assert bbox is not None
     poly = polygon_from_bounding_box(bbox, margin)
 
     # Handle dateline crossing
@@ -415,19 +478,34 @@ def create_water_mask(
     out_dir = output.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     temp_vrt = out_dir / "water_mask.vrt"
-
     download_map(polys, temp_vrt)
 
-    # Create binary mask with buffers
+    # The S3 mask is UInt8: 0=land, 1-99=ocean (km to shore),
+    # 100-200=inland water (km to land). Use _masking.create_mask_from_distance
+    # which understands this encoding, not the signed-distance version here.
+    from disp_nisar._masking import create_mask_from_distance as _make_binary_mask
+
     logger.info(
         f"Creating binary mask with land_buffer={land_buffer}km, "
         f"ocean_buffer={ocean_buffer}km"
     )
-    create_mask_from_distance(
-        water_distance_file=temp_vrt,
-        output_file=output,
-        land_buffer=land_buffer,
-        ocean_buffer=ocean_buffer,
-    )
+    if gslc_file is not None:
+        # Write intermediate EPSG:4326 mask, then warp to the GSLC UTM grid
+        temp_mask = out_dir / "_water_mask_4326.tif"
+        _make_binary_mask(
+            water_distance_file=temp_vrt,
+            output_file=temp_mask,
+            land_buffer=land_buffer,
+            ocean_buffer=ocean_buffer,
+        )
+        warp_mask_to_gslc_grid(temp_mask, gslc_file, output)
+        temp_mask.unlink(missing_ok=True)
+    else:
+        _make_binary_mask(
+            water_distance_file=temp_vrt,
+            output_file=output,
+            land_buffer=land_buffer,
+            ocean_buffer=ocean_buffer,
+        )
 
     logger.info(f"Water mask created successfully: {output}")
