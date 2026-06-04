@@ -19,6 +19,7 @@ from dolphin.workflows.config import DisplacementWorkflow
 from dolphin.workflows.displacement import OutputPaths
 from dolphin.workflows.displacement import run as run_displacement
 from opera_utils import get_dates, group_by_date
+from opera_utils.nisar import get_gslc_mask
 
 from disp_nisar import __version__, product
 from disp_nisar._masking import (
@@ -33,6 +34,7 @@ from ._utils import (
     _convert_meters_to_radians,
     _create_correlation_images,
     _frequency_to_wavelength,
+    _intersect_masks,
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
 )
@@ -89,27 +91,124 @@ def run(
                 second_to_last_date + timedelta(days=1)
             )
 
-    # Setup the binary mask as dolphin expects
+    # Get the first non-compressed CSLC file for mask generation
+    first_non_compressed = next(
+        (f for f in cfg.cslc_file_list if "compressed" not in f.name.lower()),
+        cfg.cslc_file_list[0],
+    )
+
+    # Create GSLC mask first (in native GSLC CRS - UTM)
+    gslc_mask_file = cfg.work_directory / "gslc_mask.tif"
+
+    try:
+        logger.info(f"Creating GSLC mask from {first_non_compressed}")
+        gslc_mask = get_gslc_mask(
+            first_non_compressed,
+            frequency=(
+                pge_runconfig.input_file_group.frequency
+                if isinstance(pge_runconfig.input_file_group.frequency, str)
+                else pge_runconfig.input_file_group.frequency.value
+            ),
+        )
+        strides_dict = cfg.output_options.strides.model_dump()
+        gslc_mask_strided = gslc_mask.isel(
+            y=slice(None, None, strides_dict["y"]),
+            x=slice(None, None, strides_dict["x"]),
+        )
+        del gslc_mask
+        # Save the xarray DataArray as GeoTIFF in native GSLC CRS
+        gslc_mask_strided.rio.to_raster(
+            gslc_mask_file, compress="LZW", tiled=True, blockxsize=256, blockysize=256
+        )
+        logger.info(f"GSLC mask created at {gslc_mask_file} in native CRS")
+    except Exception as e:
+        logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
+        gslc_mask_file = None
+
+    # Setup the water mask and warp to match GSLC CRS
     if pge_runconfig.dynamic_ancillary_file_group.mask_file:
-        water_binary_mask = cfg.work_directory / "water_binary_mask.tif"
+        water_binary_mask_latlon = cfg.work_directory / "water_binary_mask_latlon.tif"
         create_mask_from_distance(
             water_distance_file=pge_runconfig.dynamic_ancillary_file_group.mask_file,
-            output_file=water_binary_mask,
+            output_file=water_binary_mask_latlon,
             # Set a little conservative for the general processing
             land_buffer=1,
             ocean_buffer=1,
         )
-        cfg.mask_file = water_binary_mask
+
+        # Warp water mask to match GSLC CRS if GSLC mask exists
+        if gslc_mask_file is not None:
+            water_binary_mask = cfg.work_directory / "water_binary_mask.tif"
+            logger.info("Warping water mask to match GSLC native CRS")
+            stitching.warp_to_match(
+                input_file=water_binary_mask_latlon,
+                match_file=gslc_mask_file,
+                output_file=water_binary_mask,
+            )
+        else:
+            water_binary_mask = water_binary_mask_latlon
     else:
         water_binary_mask = None
 
-    # TODO: There is no layover/shadow mask in static layers, what to do instead?
-    # if len(cfg.correction_options.geometry_files) > 0:
-    #     layover_binary_mask_files = create_layover_shadow_masks(
-    #         cslc_static_files=cfg.correction_options.geometry_files,
-    #         output_dir=cfg.work_directory / "layover_shadow_masks",
-    #     )
-    #     cfg.layover_shadow_mask_files = layover_binary_mask_files
+    # Combine masks for unwrapping (both in GSLC native CRS)
+    if water_binary_mask is not None and gslc_mask_file is not None:
+        combined_mask_file = cfg.work_directory / "water_gslc_combined_mask.tif"
+        logger.info("Combining water mask and GSLC mask for unwrapping")
+        _intersect_masks(
+            mask_filenames=[gslc_mask_file, water_binary_mask],
+            output_filename=combined_mask_file,
+        )
+        cfg.mask_file = combined_mask_file
+    elif water_binary_mask is not None:
+        cfg.mask_file = water_binary_mask
+        logger.info("Using water mask for unwrapping")
+    elif gslc_mask_file is not None:
+        cfg.mask_file = gslc_mask_file
+        logger.info("Using GSLC mask for unwrapping")
+
+    # Build a layover/shadow mask from the GSLC radarGrid datacubes + DEM.
+    # This replaces the OPERA-CSLC nodata-mask path (which doesn't apply to
+    # NISAR) and gives wrapped_phase a real per-frame mask.
+    dem_file = pge_runconfig.dynamic_ancillary_file_group.dem_file
+    if dem_file is not None and not cfg.layover_shadow_mask_files:
+        from disp_nisar._geometry import prepare_geometry_layers
+
+        geometry_dir = cfg.work_directory / "geometry"
+        try:
+            template_raster = _build_frame_template(
+                first_non_compressed,
+                frequency=(
+                    pge_runconfig.input_file_group.frequency
+                    if isinstance(pge_runconfig.input_file_group.frequency, str)
+                    else pge_runconfig.input_file_group.frequency.value
+                ),
+                output_path=geometry_dir / "frame_template.tif",
+            )
+            geometry_layers = prepare_geometry_layers(
+                gslc_path=first_non_compressed,
+                dem_path=dem_file,
+                output_dir=geometry_dir,
+                template_raster=template_raster,
+                n_workers=cfg.worker_settings.n_parallel_bursts or 4,
+            )
+            cfg.layover_shadow_mask_files = [geometry_layers["layover_shadow_mask"]]
+            cfg.correction_options.geometry_files = [
+                geometry_layers["incidence_angle"],
+                geometry_layers["los_east"],
+                geometry_layers["los_north"],
+            ]
+            logger.info(
+                f"Layover/shadow mask: {geometry_layers['layover_shadow_mask']}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to prepare layover/shadow mask: {e}; continuing without it"
+            )
+    elif dem_file is None:
+        logger.info(
+            "No DEM provided in dynamic_ancillary_file_group; skipping layover/shadow"
+            " mask generation"
+        )
 
     if any("compressed" in f.name.lower() for f in cfg.cslc_file_list):
         # If we are passed Compressed SLCs, combine the old amplitudes with the
@@ -212,13 +311,10 @@ def create_products(
     ref_point = read_reference_point(out_paths.timeseries_paths[0].parent)
 
     # Find the geometry files, if created
-    los_east_file: Path | None
-    los_north_file: Path | None
-    try:
-        los_east_file = next(cfg.work_directory.rglob("los_east.tif"))
-        assert los_east_file is not None
-        los_north_file = los_east_file.parent / "los_north.tif"
-    except StopIteration:
+    if len(cfg.correction_options.geometry_files) > 0:
+        los_east_file = cfg.correction_options.geometry_files[1]
+        los_north_file = cfg.correction_options.geometry_files[2]
+    else:
         los_east_file = los_north_file = None
 
     # Finalize the output as an HDF5 product
@@ -237,36 +333,36 @@ def create_products(
         )
 
     combined_mask_file = cfg.work_directory / "combined_water_nodata_mask.tif"
-    if pge_runconfig.dynamic_ancillary_file_group.mask_file:
-        matching_water_binary_mask = (
-            cfg.work_directory / "water_binary_mask_nobuffer.tif"
-        )
-        tmp_outfile = matching_water_binary_mask.with_suffix(".temp.tif")
-        create_mask_from_distance(
-            water_distance_file=pge_runconfig.dynamic_ancillary_file_group.mask_file,
-            # Make the file in lat/lon
-            output_file=tmp_outfile,
-            # Give no buffer around the water
-            land_buffer=0,
-            ocean_buffer=0,
-        )
-        # Then need to warp to match the output UTM files
+
+    water_gslc_mask_file = cfg.work_directory / "water_gslc_combined_mask.tif"
+    water_gslc_mask_warped = cfg.work_directory / "water_gslc_combined_mask_warped.tif"
+
+    try:
         # Warp to match the output UTM files
         stitching.warp_to_match(
-            input_file=tmp_outfile,
+            input_file=water_gslc_mask_file,
             match_file=out_paths.timeseries_paths[0],
-            output_file=matching_water_binary_mask,
+            output_file=water_gslc_mask_warped,
         )
-        create_combined_mask(
-            mask_filename=matching_water_binary_mask,
-            image_filename=out_paths.timeseries_paths[0],
-            output_filename=combined_mask_file,
-        )
-    else:
-        matching_water_binary_mask = None
-        _create_nodata_mask(
-            filename=out_paths.timeseries_paths[0], output_filename=combined_mask_file
-        )
+    except Exception as e:
+        logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
+        water_gslc_mask_warped = None
+
+    if pge_runconfig.dynamic_ancillary_file_group.mask_file:
+        # Combine masks: water + GSLC + nodata
+        matching_water_binary_mask = water_gslc_mask_warped
+        if water_gslc_mask_warped is not None:
+            create_combined_mask(
+                mask_filename=matching_water_binary_mask,
+                image_filename=out_paths.timeseries_paths[0],
+                output_filename=combined_mask_file,
+            )
+        else:
+            matching_water_binary_mask = None
+            _create_nodata_mask(
+                filename=out_paths.timeseries_paths[0],
+                output_filename=combined_mask_file,
+            )
 
     ## TODO: remove stitched from naming in run_displacement
     # Check and update correlation paths
@@ -313,11 +409,9 @@ def create_products(
             )
 
     # Get the incidence angles for /identification metadata
-    # TODO: There is no geometry files, all are included in the data as
-    # radar grid datacube
     if len(cfg.correction_options.geometry_files) > 0:
         near_far_incidence_angles = _get_near_far_incidence_angles(
-            cfg.correction_options.geometry_files
+            cfg.correction_options.geometry_files[0]
         )
     else:
         logger.warning("Using approximate incidence angles")
@@ -409,6 +503,57 @@ def _filter_before_last_processed(
     return OutputPaths(**out_dict)
 
 
+def _build_frame_template(
+    gslc_path: Path,
+    frequency: str,
+    output_path: Path,
+) -> Path:
+    """Write a sparse GeoTIFF matching the NISAR GSLC frame for use as a template.
+
+    ``prepare_geometry_layers`` needs a raster that defines the target CRS,
+    bounds, and full-frame shape. NISAR GSLCs don't ship one, so we build it
+    from the HDF5 grid metadata. ``SPARSE_OK=YES`` means GDAL records only
+    the metadata — no pixel storage is allocated.
+    """
+    import h5py
+    from osgeo import gdal, osr
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        return output_path
+
+    with h5py.File(gslc_path, "r") as f:
+        grid = f[f"science/LSAR/GSLC/grids/{frequency}"]
+        x = grid["xCoordinates"][:]
+        y = grid["yCoordinates"][:]
+        dx = float(grid["xCoordinateSpacing"][()])
+        dy = float(grid["yCoordinateSpacing"][()])
+        epsg = int(grid["projection"].attrs["epsg_code"])
+
+    nx, ny = len(x), len(y)
+    left = float(x.min()) - abs(dx) / 2
+    top = float(y.max()) + abs(dy) / 2
+    gt = (left, abs(dx), 0.0, top, 0.0, -abs(dy))
+
+    drv = gdal.GetDriverByName("GTiff")
+    ds = drv.Create(
+        str(output_path),
+        nx,
+        ny,
+        1,
+        gdal.GDT_Byte,
+        options=["COMPRESS=LZW", "SPARSE_OK=YES", "TILED=YES", "BIGTIFF=YES"],
+    )
+    ds.SetGeoTransform(gt)
+    sr = osr.SpatialReference()
+    sr.ImportFromEPSG(epsg)
+    ds.SetProjection(sr.ExportToWkt())
+    ds.FlushCache()
+    ds = None
+    return output_path
+
+
 def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:
     """Assert that for each frame ID, there is only one real SLC passed per date."""
     is_compressed = ["compressed" in str(f).lower() for f in input_file_list]
@@ -425,19 +570,13 @@ def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:
         raise ValueError(msg)
 
 
-def _get_near_far_incidence_angles(geometry_files: list[Path]) -> tuple[float, float]:
-    import h5py
+def _get_near_far_incidence_angles(geometry_file: Path) -> tuple[float, float]:
     import numpy as np
 
-    ##TODO: min and max of incidence angle in the data in radar grid
+    incidence_angle = io.load_gdal(geometry_file, masked=True)
 
-    with h5py.File(geometry_files[0]) as ds:
-        incidence_angles = ds["/science/LSAR/GUNW/metadata/radarGrid/incidenceAngle"][
-            ()
-        ]
-
-    near_incidence = np.nanmin(incidence_angles).round(1)
-    far_incidence = np.nanmax(incidence_angles).round(1)
+    near_incidence = np.nanmin(incidence_angle).round(1)
+    far_incidence = np.nanmax(incidence_angle).round(1)
 
     return near_incidence, far_incidence
 
