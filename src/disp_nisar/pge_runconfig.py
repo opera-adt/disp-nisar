@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 class InputFileGroup(YamlModel):
     """Inputs for A group of input files."""
 
-    gslc_file_list: List[Path] = Field(
+    gslc_file_list: List[PathOrStr] = Field(
         default_factory=list,
         description="list of paths to GSLC files.",
     )
@@ -92,6 +92,23 @@ class InputFileGroup(YamlModel):
             " for the frame. If provided, the SAS will only output products whose"
             " secondary datetime is *after* `last_processed`. Otherwise, the SAS will"
             " output all products."
+        ),
+    )
+    azimuth_blocks: int = Field(
+        1,
+        description=(
+            "When the input does not match OPERA-burst naming (e.g. NISAR), split"
+            " each input frame into this many azimuth blocks and process each block"
+            " as a synthetic burst. Default 1 = no splitting."
+        ),
+        ge=1,
+    )
+    halo_rows: Optional[int] = Field(
+        None,
+        description=(
+            "Halo (input rows) on each side of an azimuth block. Default:"
+            " max(half_window_y, similarity_search_radius * stride_y,"
+            " (corr_window_y // 2) * stride_y) + 5."
         ),
     )
     model_config = ConfigDict(
@@ -136,7 +153,7 @@ class DynamicAncillaryFileGroup(YamlModel):
         ),
     )
     # Geocoded unwrapped files for ionosphere correction, SET and static geometry layers
-    gunw_files: List[Path] = Field(
+    gunw_files: List[PathOrStr] = Field(
         description=(
             "List of paths to GUNW files for ionosphere, SET and static geometry layers"
         ),
@@ -144,7 +161,7 @@ class DynamicAncillaryFileGroup(YamlModel):
 
     # Troposphere weather model
     # TODO: This has to be correction layers provided by tropo SAS separately
-    troposphere_files: Optional[List[Path]] = Field(
+    troposphere_files: Optional[List[PathOrStr]] = Field(
         default=None,
         description=(
             "List of paths to troposphere weather model files (1 per date). If none"
@@ -517,6 +534,8 @@ class RunConfig(YamlModel):
         input_options = {
             "subdataset": nisar_dataset_name,
             "wavelength": wavelength,
+            "azimuth_blocks": self.input_file_group.azimuth_blocks,
+            "halo_rows": self.input_file_group.halo_rows,
         }  # param_dict.pop("subdataset")}
         param_dict["output_options"]["epsg"] = bounds_epsg
         param_dict["output_options"]["bounds"] = bounds
@@ -617,6 +636,8 @@ class RunConfig(YamlModel):
                 frame_id=frame_id,
                 frequency=frequency,
                 polarization=polarization,
+                azimuth_blocks=workflow.input_options.azimuth_blocks,
+                halo_rows=workflow.input_options.halo_rows,
             ),
             dynamic_ancillary_file_group=DynamicAncillaryFileGroup(
                 algorithm_parameters_file=algorithm_parameters_file,

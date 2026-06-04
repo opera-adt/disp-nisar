@@ -34,6 +34,7 @@ from . import __version__ as disp_nisar_version
 from ._baselines import _interpolate_data, compute_baselines
 from ._common import DATETIME_FORMAT, NISAR_DATASET_NAME, NISAR_IDENTIFICATION_GROUP
 from ._reference import ReferencePoint
+from ._streaming import open_h5_file
 from ._utils import extract_footprint
 from .browse_image import make_browse_image_from_arr
 from .pge_runconfig import AlgorithmParameters, RunConfig
@@ -1533,11 +1534,15 @@ def _create_metadata_group(
 
 
 def _get_orbit_direction(cslc_filename: Filename) -> Literal["ascending", "descending"]:
-    with h5py.File(cslc_filename) as hf:
-        out = hf["/identification/orbit_pass_direction"][()]
+    with open_h5_file(cslc_filename) as hf:
+        # NISAR path; fall back to the legacy OPERA-CSLC path for old fixtures.
+        if "/science/LSAR/identification/orbitPassDirection" in hf:
+            out = hf["/science/LSAR/identification/orbitPassDirection"][()]
+        else:
+            out = hf["/identification/orbit_pass_direction"][()]
         if isinstance(out, bytes):
             out = out.decode("utf-8")
-    return out
+    return out.lower()
 
 
 def _get_orbit_type(
@@ -1556,7 +1561,7 @@ def _get_orbit_type(
         "MOE": "Medium precision Orbit Ephemeris",
         "DOE": "custom",
     }
-    with h5py.File(cslc_filename) as hf:
+    with open_h5_file(cslc_filename) as hf:
         out = hf["/science/LSAR/GSLC/metadata/orbit/orbitType"][()]
         if isinstance(out, bytes):
             out = out.decode("utf-8")
@@ -1879,7 +1884,7 @@ def _copy_hdf5_dsets(
     error_on_missing: bool = False,
     delete_if_exists: bool = True,
 ) -> None:
-    with h5py.File(source_file, "r") as src, h5py.File(dest_file, "a") as dst:
+    with open_h5_file(source_file, "r") as src, h5py.File(dest_file, "a") as dst:
         for dset_path, new_path in dsets_to_copy:
             if dset_path not in src:
                 msg = f"Dataset or group {dset_path} not found in {source_file}"

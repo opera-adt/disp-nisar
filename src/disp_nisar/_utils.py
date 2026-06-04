@@ -21,6 +21,8 @@ from osgeo import gdal
 from shapely.geometry import LinearRing, MultiPolygon, Polygon
 from tqdm.contrib.concurrent import thread_map
 
+from ._streaming import open_h5_file
+
 logger = logging.getLogger(__name__)
 
 gdal.UseExceptions()
@@ -291,7 +293,7 @@ def _convert_meters_to_radians(
 
 
 def get_nisar_frame_bbox(
-    cslc_file: Path,
+    cslc_file: PathOrStr,
     frequency: str = "frequencyA",
     polarization: str = "HH",  # noqa: ARG001
 ) -> tuple[int, Bbox]:
@@ -316,11 +318,9 @@ def get_nisar_frame_bbox(
     ValueError: If required metadata is missing
 
     """
-    if cslc_file.suffix in {".h5", ".hdf5"}:
-        import h5py
-
+    if Path(cslc_file).suffix in {".h5", ".hdf5"}:
         # Read CRS and bounds directly from NISAR HDF5 metadata
-        with h5py.File(cslc_file, "r") as h5f:
+        with open_h5_file(cslc_file, "r") as h5f:
             grid_group = h5f[f"science/LSAR/GSLC/grids/{frequency}"]
             epsg = int(grid_group["projection"][()])
 
@@ -337,10 +337,8 @@ def get_nisar_frame_bbox(
                 float(y_coords.max()) + abs(y_spacing) / 2,
             )
     else:
-        import h5py
-
         # Alternative format handling (non-NISAR HDF5)
-        with h5py.File(cslc_file, "r") as src:
+        with open_h5_file(cslc_file, "r") as src:
             epsg = src["data"]["spatial_ref"][()]
             data = src["data"]
 
@@ -355,10 +353,69 @@ def get_nisar_frame_bbox(
 
 
 def _frequency_to_wavelength(frequency: str, gslc_file: Filename) -> float:
+    import re
+
+    from opera_utils import is_remote_url
+    from opera_utils._remote import open_h5 as open_remote_h5
+
     dset = f"/science/LSAR/GSLC/grids/{frequency}/centerFrequency"
-    center_frequency = _get_dset_and_attrs(filename=gslc_file, dset_name=dset)[0]
+    file_str = str(gslc_file)
+    # Normalize malformed URLs missing one slash (e.g., https:/ -> https://)
+    file_str = re.sub(r"^(https?|s3):/(?!/)", r"\1://", file_str)
+
+    if is_remote_url(file_str):
+        with open_remote_h5(file_str) as hf:
+            center_frequency = float(hf[dset][()])
+    else:
+        center_frequency = _get_dset_and_attrs(filename=file_str, dset_name=dset)[0]
     wavelength = SPEED_OF_LIGHT / center_frequency
     return wavelength
+
+
+def _intersect_masks(
+    mask_filenames: list[Filename],
+    output_filename: Filename | None = None,
+) -> Path:
+    """Create an intersect mask from `mask_filenames`.
+
+    Parameters
+    ----------
+    mask_filenames : list[PathOrStr]`
+        The file path of the existing mask files. This masks specifies pixels that
+        are valid (1) or invalid (0).
+    output_filename : PathOrStr, optional, default=None
+        The file path where the combined mask will be saved.
+        If None, creates "combined_mask.tif" in the same directory as `mask_filename`
+
+    Returns
+    -------
+    Path
+        The path to the created intersected mask file.
+
+    """
+    if not mask_filenames:
+        raise ValueError("The list of mask filenames cannot be empty.")
+
+    # Resolve input paths
+    input_paths = [Path(f) for f in mask_filenames]
+
+    # Read and intersect masks
+    combined_mask = None
+
+    for mask_filename in input_paths:
+        mask_data = io.load_gdal(mask_filename).astype(bool)
+        # Logical AND operation
+        if combined_mask is not None:
+            combined_mask = combined_mask & mask_data
+        else:
+            combined_mask = mask_data
+
+    if output_filename is None:
+        output_filename = Path(mask_filename).parent / "combined_mask.tif"
+    io.write_arr(
+        like_filename=mask_filename, arr=combined_mask, output_name=output_filename
+    )
+    return Path(output_filename)
 
 
 def gslc_pixel_spacing(

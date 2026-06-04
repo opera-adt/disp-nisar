@@ -37,6 +37,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from ._streaming import open_h5_file
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -118,7 +120,6 @@ def gslc_to_zarr(
     Full write time depends on I/O bandwidth; ~30–90 min on a fast NFS/SSD.
 
     """
-    import h5py
     import zarr
 
     try:
@@ -149,7 +150,7 @@ def gslc_to_zarr(
     root.attrs["file_list"] = [str(f) for f in file_list]
 
     # Keep all HDF5 files open for the duration of the write
-    handles = [h5py.File(f, "r") for f in file_list]
+    handles = [open_h5_file(f, "r") for f in file_list]
 
     try:
         for freq_letter in freqs:

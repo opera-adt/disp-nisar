@@ -15,6 +15,15 @@ input_file_group:
   #   output products whose secondary datetime is *after* `last_processed`.
   #   Type: string | null.
   last_processed:
+  # When the input does not match OPERA-burst naming (e.g. NISAR), split each input frame into
+  #   this many azimuth blocks and process each block as a synthetic burst. Default 1 = no
+  #   splitting.
+  #   Type: integer.
+  azimuth_blocks: 8
+  # Halo (input rows) on each side of an azimuth block. Default: max(half_window_y,
+  #   similarity_search_radius * stride_y, (corr_window_y // 2) * stride_y) + 5.
+  #   Type: integer | null.
+  halo_rows:
 dynamic_ancillary_file_group:
   # REQUIRED: Path to file containing SAS algorithm parameters.
   #   Type: string.
@@ -81,7 +90,7 @@ worker_settings:
   # If processing separate spatial bursts, number of bursts to run in parallel for wrapped-
   #   phase-estimation.
   #   Type: integer.
-  n_parallel_bursts: 1
+  n_parallel_bursts: 8
   # Size (rows, columns) of blocks of data to load at a time.
   #   Type: array.
   block_shape:

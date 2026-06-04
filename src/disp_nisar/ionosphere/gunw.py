@@ -12,7 +12,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
-import h5py
 import numpy as np
 from dolphin import io
 from dolphin.io import round_mantissa
@@ -21,6 +20,7 @@ from opera_utils import get_dates
 from opera_utils._utils import format_nc_filename
 from opera_utils.stitching import warp_to_match
 
+from .._streaming import open_h5_file
 from .inversion import build_design_matrix, invert_ifg_to_timeseries
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def get_gunw_dates(gunw_file: Path) -> tuple[date, date]:
         ``(reference_date, secondary_date)`` as ``datetime.date`` objects.
 
     """
-    with h5py.File(gunw_file, "r") as f:
+    with open_h5_file(gunw_file, "r") as f:
         id_group = f[GUNW_IDENTIFICATION_PATH]
         ref_str = id_group["referenceZeroDopplerStartTime"][()].decode()
         sec_str = id_group["secondaryZeroDopplerStartTime"][()].decode()
@@ -91,7 +91,7 @@ def read_ionosphere_from_gunw(
     iono_path = GUNW_IONO_PATH_TEMPLATE.format(
         frequency=frequency, polarization=polarization
     )
-    with h5py.File(gunw_file, "r") as f:
+    with open_h5_file(gunw_file, "r") as f:
         if iono_path not in f:
             logger.warning(
                 "Ionosphere dataset not found at %s in %s", iono_path, gunw_file
@@ -301,7 +301,7 @@ def get_ionosphere_phase_screen(
     for gf in sorted(gunw_files):
         try:
             ref_date, sec_date = get_gunw_dates(gf)
-            with h5py.File(gf, "r") as f:
+            with open_h5_file(gf, "r") as f:
                 if iono_path not in f:
                     logger.warning("Ionosphere path not found in %s, skipping", gf)
                     continue

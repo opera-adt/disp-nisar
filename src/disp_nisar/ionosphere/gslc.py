@@ -17,9 +17,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import h5py
 import numpy as np
 
+from .._streaming import open_h5_file
 from .mask import make_valid_mask
 from .utils import (
     disp_to_phase,
@@ -60,7 +60,7 @@ def get_center_frequencies(gslc_path: str | Path) -> tuple[float, float]:
         Center frequencies in Hz for frequencyA and frequencyB respectively.
 
     """
-    with h5py.File(gslc_path, "r") as f:
+    with open_h5_file(gslc_path, "r") as f:
         f_A = float(f[GSLC_CENTER_FREQ_PATH.format(frequency="frequencyA")][()])
         f_B = float(f[GSLC_CENTER_FREQ_PATH.format(frequency="frequencyB")][()])
     return f_A, f_B
