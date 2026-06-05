@@ -29,5 +29,7 @@ dependencies:
   - tophu
   # - cxx-compiler # for whirlwind
   - dolphin>=v0.36.2
+  - aiohttp
+  - s3fs
   - pip:
     - spurt>0.1.0
