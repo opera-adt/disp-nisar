@@ -287,7 +287,7 @@ def run(
         # Note: implement and test carying compressed slcs
         # with forward/historical mode, for workflow with freqB
         # probably keep it same as freqA to keep it consistent
-        run_displacement(cfg=cfg_freqB, debug=debug)
+        run_displacement(cfg=cfg_freqB, debug=debug, raise_on_empty=False)
 
         # freqB only feeds split-spectrum ionosphere via its timeseries (built
         # from the stitched result) and its compressed SLCs are not carried
