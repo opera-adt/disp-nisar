@@ -27,6 +27,7 @@ from disp_nisar._masking import (
 )
 from disp_nisar._ps import precompute_ps
 from disp_nisar._reference import ReferencePoint, read_reference_point
+from disp_nisar._remote_input import trim_staged_slc_arrays
 from disp_nisar._utils import (
     _convert_meters_to_radians,
     _create_correlation_images,
@@ -230,6 +231,15 @@ def run(
     assert out_paths.timeseries_paths is not None
     assert out_paths.timeseries_residual_paths is not None
 
+    # The block outputs have been stitched into full-frame rasters; everything
+    # downstream (timeseries, ionosphere, create_products) reads those or the
+    # compressed SLCs. Prune the per-block intermediates now, keeping the
+    # compressed SLCs that create_products collects into compressed_slcs/.
+    _prune_block_dirs(
+        cfg.work_directory,
+        keep_files=[p for paths in out_paths.comp_slc_dict.values() for p in paths],
+    )
+
     # Handle forward mode re-referencing
     if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":
         from dolphin.timeseries import _redo_reference
@@ -279,6 +289,11 @@ def run(
         # probably keep it same as freqA to keep it consistent
         run_displacement(cfg=cfg_freqB, debug=debug)
 
+        # freqB only feeds split-spectrum ionosphere via its timeseries (built
+        # from the stitched result) and its compressed SLCs are not carried
+        # forward, so clear its per-block trees entirely.
+        _prune_block_dirs(cfg_freqB.work_directory)
+
         # Run split-spectrum ionosphere estimation for freq.B and freq.A
         # use runconfigs as input to run_ionosphere_estimation.
         f_A, f_B = get_center_frequencies(cfg_freqB.cslc_file_list[0])
@@ -302,6 +317,20 @@ def run(
             polarization=pge_runconfig.input_file_group.polarization,
         )
 
+    # The displacement workflows (freqA above, and freqB for split-spectrum)
+    # have now consumed the input SLC arrays. create_products only reads
+    # metadata/coordinates, so reclaim disk by stripping the heavy SLC pixel
+    # arrays from any GSLCs we staged (user-provided originals are left alone).
+    polarization = pge_runconfig.input_file_group.polarization
+    if not isinstance(polarization, str):
+        polarization = polarization.value
+    trim_staged_slc_arrays(
+        cfg.cslc_file_list,
+        stage_dir=pge_runconfig.product_path_group.scratch_path / "stage_inputs",
+        frequencies=("frequencyA", "frequencyB"),
+        polarization=polarization,
+    )
+
     # Note: move correcting nominal displacement with ionosphere inside the
     # create_products function, or just pulling it out from iono_corrected dir
     create_products(
@@ -318,6 +347,60 @@ def run(
     logger.info(f"Maximum memory usage: {max_mem:.2f} GB")
     logger.info(f"Config file dolphin version: {cfg._dolphin_version}")
     logger.info(f"Current running disp_nisar version: {__version__}")
+
+
+def _prune_block_dirs(work_directory: Path, keep_files: Iterable[Path] = ()) -> int:
+    """Remove per-azimuth-block intermediate files after stitching.
+
+    When ``azimuth_blocks > 1``, dolphin splits the frame into synthetic-burst
+    ``block_NN`` directories (see dolphin's ``split_frame_into_blocks``) and
+    stitches their wrapped-phase outputs into full-frame rasters. Once stitched
+    (and unwrapped/inverted), the per-block contents are dead weight -- except
+    the compressed SLCs, which are full-extent and feed forward/historical mode
+    and ``create_products``'s ``compressed_slcs`` output.
+
+    Everything under ``block_*`` is deleted except the paths in ``keep_files``
+    (pass the run's ``comp_slc_dict`` values to preserve compressed SLCs; pass
+    nothing to clear the block trees entirely, e.g. for freqB). Emptied
+    directories are pruned. Returns the number of bytes reclaimed.
+    """
+    import os
+
+    keep: set[Path] = set()
+    for f in keep_files:
+        try:
+            keep.add(Path(f).resolve())
+        except OSError:
+            continue
+
+    reclaimed = 0
+    for block_dir in sorted(work_directory.glob("block_*")):
+        if not block_dir.is_dir():
+            continue
+        # Walk bottom-up so child dirs are emptied before we prune their parent.
+        for root, _dirs, files in os.walk(block_dir, topdown=False):
+            root_path = Path(root)
+            for name in files:
+                path = root_path / name
+                try:
+                    if path.resolve() in keep:
+                        continue
+                    size = path.stat().st_size
+                    path.unlink()
+                    reclaimed += size
+                except OSError as e:
+                    logger.warning(f"Could not remove {path}: {e}")
+            try:
+                if not any(root_path.iterdir()):
+                    root_path.rmdir()
+            except OSError:
+                pass
+    if reclaimed:
+        logger.info(
+            f"Pruned {reclaimed / 1e6:.1f} MB of per-block intermediates in "
+            f"{work_directory} (kept {len(keep)} compressed SLCs)"
+        )
+    return reclaimed
 
 
 def create_products(
