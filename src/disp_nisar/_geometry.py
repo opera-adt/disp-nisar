@@ -6,13 +6,14 @@ import logging
 import multiprocessing as mp
 from pathlib import Path
 
-import h5py
 import numpy as np
 import rioxarray as rxr
 from dolphin._types import Filename
 from pyproj import Transformer
 from scipy.interpolate import RegularGridInterpolator
 from tqdm import tqdm
+
+from ._streaming import open_h5_file
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ def prepare_geometry_layers(
 
     logger.info(f"Reading radar grid from {gslc_path}")
     # Read radar grid data from GSLC
-    with h5py.File(gslc_path) as f:
+    with open_h5_file(gslc_path, "r") as f:
         rg = f["science/LSAR/GSLC/metadata/radarGrid"]
         heights = rg["heightAboveEllipsoid"][:]
         x_rg = rg["xCoordinates"][:]

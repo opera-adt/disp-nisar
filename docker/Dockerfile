@@ -73,8 +73,8 @@ RUN echo "numpy<2" > /tmp/constraints.txt && \
     PIP_CONSTRAINT=/tmp/constraints.txt pip install git+https://github.com/isce-framework/spurt@v0.1.1 && \
     rm /tmp/constraints.txt
 # --no-deps because they are installed with conda
-RUN pip install rich && pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.25.5
-RUN pip install tyro && pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.42.4
+RUN pip install rich && pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.25.7
+RUN pip install tyro && pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.42.6
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER . .
 RUN python -m pip install --no-deps .
