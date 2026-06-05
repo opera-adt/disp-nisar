@@ -68,10 +68,12 @@ RUN micromamba install --yes --channel conda-forge -n base -f /tmp/specfile.txt 
 # Activate, otherwise python will not be found
 # https://github.com/mamba-org/micromamba-docker#running-commands-in-dockerfile-within-the-conda-environment
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
-# Pin numpy<2 to prevent spurt from upgrading it (numba requires numpy<2.1)
-RUN echo "numpy<2" > /tmp/constraints.txt && \
-    PIP_CONSTRAINT=/tmp/constraints.txt pip install git+https://github.com/isce-framework/spurt@v0.1.1 && \
-    rm /tmp/constraints.txt
+# spurt's heavy deps (numpy, scipy, h5py, numba) come from conda and are
+# mutually consistent (numba>=0.61 supports numpy 2.x). The old `numpy<2` pin is
+# obsolete and, on Python 3.13, forces a source build of numpy 1.26 (no cp313
+# wheel) which fails because the image has no C compiler. numpy 2.x already
+# satisfies spurt's `numpy>=1.23`, so install without the constraint.
+RUN pip install git+https://github.com/isce-framework/spurt@v0.1.1
 # --no-deps because they are installed with conda
 RUN pip install rich && pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.25.7
 RUN pip install tyro && pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.42.6
