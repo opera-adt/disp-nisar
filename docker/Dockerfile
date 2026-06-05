@@ -62,7 +62,14 @@ SHELL ["/usr/local/bin/_dockerfile_shell.sh"]
 # Install conda packages
 # https://github.com/mamba-org/micromamba-docker#quick-start
 COPY --chown=$MAMBA_USER:$MAMBA_USER docker/specfile.txt /tmp/specfile.txt
-RUN micromamba install --yes --channel conda-forge -n base -f /tmp/specfile.txt && \
+# The conda-forge CDN occasionally stalls mid-download (libmamba error 28,
+# "Operation too slow"), which would otherwise fail the whole build on a single
+# flaky transfer. Retry the install a few times before giving up.
+RUN for attempt in 1 2 3 4 5; do \
+        micromamba install --yes --channel conda-forge -n base -f /tmp/specfile.txt && break; \
+        if [ "$attempt" = "5" ]; then echo "micromamba install failed after $attempt attempts" && exit 1; fi; \
+        echo "micromamba install attempt $attempt stalled; retrying in 15s..." && sleep 15; \
+    done && \
     micromamba clean --all --yes
 
 # Activate, otherwise python will not be found
