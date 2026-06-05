@@ -16,7 +16,7 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import h5py
 from opera_utils import is_remote_url
@@ -49,7 +49,7 @@ def _normalize_url(url: str) -> str:
 
 
 def _extract_subset(
-    src_path: Path, dst_path: Path, frequency: str, polarization: str
+    src_path: Path, dst_path: Path, frequencies: Sequence[str], polarization: str
 ) -> None:
     """Locally copy only the needed datasets/groups into a smaller file.
 
@@ -57,6 +57,11 @@ def _extract_subset(
     that don't survive a cross-file copy. We copy the coordinate datasets first,
     then the polarization dataset, then rebuild the dimension-scale links so
     GDAL's NETCDF driver can derive a geotransform from the result.
+
+    Multiple ``frequencies`` may be requested (e.g. ``frequencyA`` and
+    ``frequencyB`` for split-spectrum ionosphere) — each frequency's grid is
+    copied into the same staged file while the frequency-agnostic metadata
+    groups are copied only once.
     """
     with h5py.File(src_path, "r") as src, h5py.File(dst_path, "w") as dst:
         for k, v in src.attrs.items():
@@ -66,15 +71,16 @@ def _extract_subset(
             if grp in src and grp not in dst:
                 src.copy(grp, dst, name=grp)
 
-        grid = f"/science/LSAR/GSLC/grids/{frequency}"
-        # Order matters: aux/coord datasets first so dimension scales exist
-        # before the polarization dataset is copied.
-        for name in (*_GRID_AUX_DATASETS, polarization):
-            src_path_h5 = f"{grid}/{name}"
-            if src_path_h5 in src and src_path_h5 not in dst:
-                src.copy(src_path_h5, dst, name=src_path_h5)
+        for frequency in frequencies:
+            grid = f"/science/LSAR/GSLC/grids/{frequency}"
+            # Order matters: aux/coord datasets first so dimension scales exist
+            # before the polarization dataset is copied.
+            for name in (*_GRID_AUX_DATASETS, polarization):
+                src_path_h5 = f"{grid}/{name}"
+                if src_path_h5 in src and src_path_h5 not in dst:
+                    src.copy(src_path_h5, dst, name=src_path_h5)
 
-        _rebuild_dimension_scales(dst, grid, polarization)
+            _rebuild_dimension_scales(dst, grid, polarization)
 
 
 def _rebuild_dimension_scales(dst: h5py.File, grid: str, polarization: str) -> None:
@@ -111,11 +117,105 @@ def _rebuild_dimension_scales(dst: h5py.File, grid: str, polarization: str) -> N
     pol.dims[1].attach_scale(x)
 
 
+def _strip_slc_arrays(path: Path, frequencies: Sequence[str], polarization: str) -> int:
+    """Drop the heavy SLC pixel arrays from a staged GSLC, keeping metadata.
+
+    Once Dolphin's displacement workflows have consumed the input grids, the
+    only large datasets left in a staged file are the ``/grids/{freq}/{pol}``
+    complex SLC arrays. ``create_products`` reads identification, orbit, and
+    coordinate metadata but never the SLC pixels, so those arrays are dead
+    weight for the rest of the run.
+
+    HDF5 cannot reclaim deleted-dataset space in place, so we rewrite the file
+    to a fresh copy that omits the SLC arrays (cheap — only small metadata and
+    coordinate datasets remain) and atomically replace the original. Coordinate
+    and projection datasets, ``/identification``, ``/metadata/orbit``, and
+    ``/metadata/radarGrid`` are all preserved.
+
+    Returns the number of bytes reclaimed (0 if no SLC array was present).
+    """
+    drop = {f"/science/LSAR/GSLC/grids/{fr}/{polarization}" for fr in frequencies}
+    with h5py.File(path, "r") as src:
+        present = [p for p in drop if p in src]
+    if not present:
+        return 0  # nothing to strip (e.g. compressed SLC or already trimmed)
+
+    size_before = path.stat().st_size
+    tmp = path.with_suffix(path.suffix + ".trim")
+    with h5py.File(path, "r") as src, h5py.File(tmp, "w") as dst:
+        for k, v in src.attrs.items():
+            dst.attrs[k] = v
+
+        def _visit(name: str, obj) -> None:
+            full = f"/{name}"
+            if full in drop:
+                return  # skip the heavy SLC array
+            if isinstance(obj, h5py.Group):
+                grp = dst.require_group(full)
+                for k, v in obj.attrs.items():
+                    grp.attrs[k] = v
+            elif isinstance(obj, h5py.Dataset):
+                src.copy(obj, dst, name=full)
+
+        src.visititems(_visit)
+
+        # The coordinate datasets carry dimension-scale references to the now
+        # removed SLC; drop them so the new file has no dangling references.
+        for fr in frequencies:
+            grid = f"/science/LSAR/GSLC/grids/{fr}"
+            for coord in ("xCoordinates", "yCoordinates"):
+                p = f"{grid}/{coord}"
+                if p in dst:
+                    for attr in ("REFERENCE_LIST", "DIMENSION_LIST"):
+                        if attr in dst[p].attrs:
+                            del dst[p].attrs[attr]
+
+    tmp.replace(path)
+    reclaimed = size_before - path.stat().st_size
+    logger.info(
+        f"Trimmed SLC arrays from {path.name} ({reclaimed / 1e6:.1f} MB reclaimed)"
+    )
+    return reclaimed
+
+
+def trim_staged_slc_arrays(
+    cslc_files: Iterable[str | Path],
+    stage_dir: Path,
+    frequencies: Sequence[str],
+    polarization: str,
+) -> int:
+    """Strip SLC pixel arrays from staged GSLCs after they are no longer needed.
+
+    Only files that live under ``stage_dir`` (i.e. were staged by this run) are
+    touched — user-provided local GSLCs are never modified. Compressed SLCs are
+    skipped. Returns the total bytes reclaimed.
+    """
+    stage_dir = Path(stage_dir).resolve()
+    total = 0
+    for f in cslc_files:
+        path = Path(f)
+        if "compressed" in path.name.lower():
+            continue
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if not resolved.is_relative_to(stage_dir):
+            continue  # not staged by us — leave the user's original untouched
+        try:
+            total += _strip_slc_arrays(resolved, frequencies, polarization)
+        except OSError as e:
+            logger.warning(f"Could not trim {path.name}: {e}")
+    if total:
+        logger.info(f"Reclaimed {total / 1e6:.1f} MB from staged GSLC SLC arrays")
+    return total
+
+
 def _download_and_trim(
     url: str,
     scratch_dir: Path,
     raw_dir: Path,
-    frequency: str,
+    frequencies: Sequence[str],
     polarization: str,
 ) -> Path:
     """Download one granule then extract the subset; remove the full download."""
@@ -134,8 +234,8 @@ def _download_and_trim(
         earthaccess.download([norm], local_path=str(raw_dir), provider="ASF")
 
     tmp = final.with_suffix(final.suffix + ".part")
-    logger.info(f"Extracting {polarization}@{frequency} from {fname}")
-    _extract_subset(raw, tmp, frequency, polarization)
+    logger.info(f"Extracting {polarization}@{','.join(frequencies)} from {fname}")
+    _extract_subset(raw, tmp, frequencies, polarization)
     tmp.replace(final)
 
     # Free disk: drop the full granule once the trimmed copy is in place.
@@ -151,7 +251,7 @@ def _download_and_trim(
 def stage_remote_gslcs(
     urls: Iterable[str | Path],
     scratch_dir: Path,
-    frequency: str = "frequencyA",
+    frequencies: Sequence[str] = ("frequencyA",),
     polarization: str = "HH",
     n_workers: int = 6,
 ) -> list[Path]:
@@ -165,8 +265,10 @@ def stage_remote_gslcs(
         Mix of local paths and remote ``https://`` / ``s3://`` URLs.
     scratch_dir : Path
         Directory to write trimmed local outputs into.
-    frequency : str
-        NISAR frequency to keep (``"frequencyA"`` or ``"frequencyB"``).
+    frequencies : list of str
+        NISAR frequencies to keep (``"frequencyA"`` and/or ``"frequencyB"``).
+        Both are staged in a single download pass when split-spectrum
+        ionosphere will run (no GUNW files provided).
     polarization : str
         Polarization to keep (``"HH"``, ``"HV"``, ``"VV"``, ``"VH"``).
     n_workers : int
@@ -195,7 +297,8 @@ def stage_remote_gslcs(
 
     logger.info(
         f"Staging {len(remote_indices)} remote GSLCs -> {scratch_dir}"
-        f" (keeping {polarization}@{frequency}, {n_workers} parallel workers)"
+        f" (keeping {polarization}@{','.join(frequencies)},"
+        f" {n_workers} parallel workers)"
     )
 
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -205,7 +308,7 @@ def stage_remote_gslcs(
                 url_list[i],
                 scratch_dir,
                 raw_dir,
-                frequency,
+                frequencies,
                 polarization,
             ): i
             for i in remote_indices
@@ -244,10 +347,19 @@ def run_dolphin_with_earthaccess(
         if not isinstance(polarization, str):
             polarization = polarization.value
 
+        # When no GUNW files are provided, main.run() runs a second displacement
+        # workflow on frequencyB for split-spectrum ionosphere (see main.py).
+        # Stage both frequencies in this single download pass so the freqB run
+        # has its grid without re-downloading every granule.
+        frequencies = [frequency]
+        if not pge_runconfig.dynamic_ancillary_file_group.gunw_files:
+            if "frequencyB" not in frequencies:
+                frequencies.append("frequencyB")
+
         local_files = stage_remote_gslcs(
             gslc_files,
             scratch_dir=Path(scratch_dir),
-            frequency=frequency,
+            frequencies=frequencies,
             polarization=polarization,
             n_workers=n_workers,
         )
