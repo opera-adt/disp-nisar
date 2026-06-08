@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import logging
+from enum import Enum
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Optional, Protocol, Self, Union
+from urllib.parse import ParseResult, urlparse
 
 import h5py
 import numpy as np
 from opera_utils import is_remote_url
-from opera_utils.credentials import ASFCredentialEndpoints, AWSCredentials
+from opera_utils.credentials import AWSCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +26,293 @@ except ImportError:
     logger.debug("earthaccess not available, remote streaming disabled")
 
 
+class ASFCredentialEndpoints(Enum):
+    """Enumeration of ASF temporary credentials endpoints."""
+
+    OPERA = "https://cumulus.asf.alaska.edu/s3credentials"
+    OPERA_UAT = "https://cumulus-test.asf.alaska.edu/s3credentials"
+    SENTINEL1 = "https://sentinel1.asf.alaska.edu/s3credentials"
+    NISAR = "https://nisar.asf.earthdatacloud.nasa.gov/s3credentials"
+
+
+class GeneralPath(Protocol):
+    """A protocol to handle paths that can be either local or S3 paths."""
+
+    def parent(self): ...
+
+    def suffix(self): ...
+
+    def read_text(self): ...
+
+    def __truediv__(self, other): ...
+
+    def __str__(self) -> str: ...
+
+    def __fspath__(self) -> str:
+        return str(self)
+
+
+class S3Path(GeneralPath):
+    """A convenience class to handle paths on S3.
+
+    This class relies on `pathlib.Path` for operations using `urllib` to parse the url.
+
+    If passing a url with a trailing slash, the slash will be preserved
+    when converting back to string.
+
+    Note that pure path manipulation functions do *not* require `boto3`,
+    but functions which interact with S3 (e.g. `exists()`, `.read_text()`) do.
+
+    Attributes
+    ----------
+    bucket : str
+        Name of bucket in the url
+    path : pathlib.Path
+        The URL path after s3://<bucket>/
+    key : str
+        Alias of `path` converted to a string
+
+    Examples
+    --------
+    >>> from orca.paths import S3Path
+    >>> s3_path = S3Path("s3://bucket/path/to/file.txt")
+    >>> str(s3_path)
+    's3://bucket/path/to/file.txt'
+    >>> s3_path.parent
+    S3Path("s3://bucket/path/to/")
+    >>> str(s3_path.parent)
+    's3://bucket/path/to/'
+
+    """
+
+    def __init__(self, s3_url: Union[str, "S3Path"]):
+        """Create an S3Path.
+
+        Parameters
+        ----------
+        s3_url : str or S3Path
+            The S3 url to parse.
+
+        """
+        # Names come from the urllib.parse.ParseResult
+        if isinstance(s3_url, S3Path):
+            self._scheme: str = s3_url._scheme
+            self._netloc: str = s3_url._netloc
+            self.bucket: str = s3_url.bucket
+            self.path: Path = s3_url.path
+            self._trailing_slash: str = s3_url._trailing_slash
+        else:
+            parsed: ParseResult = urlparse(s3_url)
+            self._scheme = parsed.scheme
+            self._netloc = self.bucket = parsed.netloc
+            # self._parsed = parsed
+            self.path = Path(parsed.path)
+            self._trailing_slash = "/" if s3_url.endswith("/") else ""
+
+        if self._scheme != "s3":
+            raise ValueError(f"{s3_url} is not an S3 url")
+
+    @classmethod
+    def from_bucket_key(cls, bucket: str, key: str):
+        """Create a `S3Path` from the bucket name and key/prefix.
+
+        Matches API of some Boto3 functions which use this format.
+
+        Parameters
+        ----------
+        bucket : str
+            Name of S3 bucket.
+        key : str
+            S3 url of path after the bucket.
+
+        """
+        return cls(f"s3://{bucket}/{key}")
+
+    def get_path(self) -> str:
+        """Get the full S3 URI as a string."""
+        # For S3 paths, we need to add the double slash and netloc back to the front
+        return f"{self._scheme}://{self._netloc}{self.path.as_posix()}{self._trailing_slash}"
+
+    @property
+    def key(self) -> str:
+        """Name of key/prefix within the bucket with leading slash removed."""
+        return f"{str(self.path.as_posix()).lstrip('/')}{self._trailing_slash}"
+
+    @property
+    def parent(self):
+        """The S3Path to the parent directory."""
+        parent_path = self.path.parent
+        # Since the constructor only accepts s3:// URIs,
+        # the else case will never be triggered. So we could simplify it to:
+        return S3Path(f"{self._scheme}://{self._netloc}{parent_path.as_posix()}/")
+        # # Since this is a parent, it will will always end in a slash
+        # if self._scheme == "s3":
+        #     # For S3 paths, we need to add the scheme and netloc back to the front
+        #     return S3Path(f"{self._scheme}://{self._netloc}{parent_path.as_posix()}/")
+        # else:
+        #     # For local paths, we can just convert the path to a string
+        #     return S3Path(str(parent_path) + "/")
+
+    @property
+    def suffix(self):
+        """The file extension (including the dot) or '' if there is no extension."""
+        return self.path.suffix
+
+    def _get_client(self):
+        import boto3
+
+        return boto3.client("s3")
+
+    def exists(self) -> bool:
+        """Whether this path exists on S3."""
+        client = self._get_client()
+        resp = client.list_objects_v2(
+            Bucket=self.bucket,
+            Prefix=self.key,
+            MaxKeys=1,
+        )
+        return resp.get("KeyCount") == 1
+
+    def read_text(self) -> str:
+        """Download/read the S3 file as text."""
+        return self._download_as_bytes().decode()
+
+    def read_bytes(self) -> bytes:
+        """Download/read the S3 file as bytes."""
+        return self._download_as_bytes()
+
+    def write_bytes(self, data: bytes) -> None:
+        """Write bytes to a file on S3."""
+        client = self._get_client()
+        client.put_object(Bucket=self.bucket, Key=self.key, Body=data)
+
+    def _download_as_bytes(self) -> bytes:
+        """Download file to a `BytesIO` buffer to read as bytes."""
+        from io import BytesIO
+
+        client = self._get_client()
+
+        bio = BytesIO()
+        client.download_fileobj(self.bucket, self.key, bio)
+        bio.seek(0)
+        out = bio.read()
+        bio.close()
+        return out
+
+    def write_text(self, data: str) -> None:
+        """Write a string to a file on S3."""
+        return self.write_bytes(data.encode("utf-8"))
+
+    def __truediv__(self, other):
+        new = copy.deepcopy(self)
+        new.path = self.path / other
+        new._trailing_slash = "/" if str(other).endswith("/") else ""
+        return new
+
+    def __repr__(self):
+        return f'S3Path("{self.get_path()}")'
+
+    def __str__(self):
+        return self.get_path()
+
+    def glob(self, pattern):
+        """Perform a glob-style search for S3 objects.
+
+        Parameters
+        ----------
+        pattern : str
+            The glob pattern to match against S3 object keys.
+
+        Returns
+        -------
+        list
+            A list of S3 objects matching the given pattern.
+
+        """
+        full_pattern = str(self) + pattern
+        logger.debug(f"Searching {full_pattern}")
+        return list_bucket(full_bucket_glob=full_pattern)
+
+
+def list_bucket(
+    bucket: str | None = None,
+    prefix: str | None = None,
+    suffix: str | None = None,
+    full_bucket_glob: Optional[str] = None,
+    aws_profile: str | None = None,
+    num_workers: int = 10,
+) -> list[str]:
+    """Use `s5cmd` to quickly list items in a bucket.
+
+    Parameters
+    ----------
+    bucket : str
+        Name of the bucket.
+    prefix : str, optional
+        Prefix to filter by, by default "".
+    suffix : str, optional
+        Suffix to filter by, by default "".
+    full_bucket_glob : str, optional
+        Alternate to prefix/suffix. Full glob to filter by, by default None.
+    aws_profile : str, optional
+        AWS profile to use, by default None.
+    num_workers : int, default = 10
+        Number of workers to use for parallel downloads.
+
+    Returns
+    -------
+    list[str]
+        list of items in the bucket.
+
+    """
+    import subprocess
+    import json
+
+    cmd = ["s5cmd", "--json", "--numworkers", str(num_workers)]
+    if aws_profile:
+        cmd += ["--profile", aws_profile]
+
+    if full_bucket_glob:
+        bucket_str = full_bucket_glob
+    else:
+        bucket_str = f"s3://{bucket}"
+        if prefix:
+            bucket_str += f"/{prefix}"
+        if suffix:
+            bucket_str += f"*{suffix}"
+    cmd += ["ls", bucket_str.strip()]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=90)
+    except subprocess.CalledProcessError as e:
+        try:
+            # no matching files found. structured error is returned:
+            s5cmd_error = json.loads(e.stderr)
+            if "no object found" in s5cmd_error["error"]:
+                return []
+        except json.JSONDecodeError:
+            pass
+        if "ExpiredToken" in e.stderr:
+            raise CredentialsError(
+                "Error downloading files: AWS credentials have expired."
+            ) from e
+        # Unknown error:
+        raise RuntimeError(f"Error listing bucket {bucket_str}: {e.stderr}") from e
+
+    out: list[str] = []
+    for line in p.stdout.splitlines():
+        item = json.loads(line)
+        if item["type"] == "directory":
+            continue
+        out.append(item["key"])
+    return out
+
+
+class CredentialsError(Exception):
+    """Raised when AWS credentials have expired."""
+
+
 def get_earthaccess_s3_creds(
-    dataset: str | ASFCredentialEndpoints = ASFCredentialEndpoints.OPERA,
+    dataset: str | ASFCredentialEndpoints = ASFCredentialEndpoints.NISAR,
 ) -> AWSCredentials:
     """Get S3 credentials for the specified dataset.
 
@@ -32,7 +320,7 @@ def get_earthaccess_s3_creds(
     ----------
     dataset : str, optional
         The name of the dataset to get credentials for.
-        Options are "opera" or "sentinel1". Default is "opera".
+        Options are "OPERA", "SENTINEL1", or "NISAR".
 
     Returns
     -------
@@ -56,14 +344,16 @@ def get_earthaccess_s3_creds(
 
     """
     if isinstance(dataset, str):
-        endpoint: ASFCredentialEndpoints = getattr(ASFCredentialEndpoints, dataset)
+        endpoint: ASFCredentialEndpoints = getattr(
+            ASFCredentialEndpoints, dataset.upper()
+        )
     else:
         endpoint = dataset
     return AWSCredentials.from_asf(endpoint=endpoint)
 
 
 def get_authorized_s3_client(
-    dataset: str | ASFCredentialEndpoints = ASFCredentialEndpoints.OPERA,
+    dataset: str | ASFCredentialEndpoints = ASFCredentialEndpoints.NISAR,
     aws_credentials: AWSCredentials | None = None,
 ):
     """Get an authorized S3 client for the specified dataset.
@@ -83,10 +373,30 @@ def get_authorized_s3_client(
 
     """
     import boto3
+    # from botocore.config import Config
 
     if aws_credentials is None:
         aws_credentials = get_earthaccess_s3_creds(dataset=dataset)
 
+    # client = boto3.client(
+    #     "s3",
+    #     aws_access_key_id=aws_credentials.access_key_id,
+    #     aws_secret_access_key=aws_credentials.secret_access_key,
+    #     aws_session_token=aws_credentials.session_token,
+    #     region_name="us-west-2",
+    #     config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    # )
+
+    # # Correct signature for the 'before-sign.s3' event hook
+    # # The request object inside **kwargs contains the raw HTTP headers about to be sent
+    # def add_requester_pays_header(request, **kwargs):
+    #     request.headers["x-amz-request-payer"] = "requester"
+
+    # # Register it so that EVERY operation (HeadObject, GetObject, ListObjects)
+    # # automatically signs with the Requester Pays flag appended.
+    # client.meta.events.register("before-sign.s3", add_requester_pays_header)
+
+    # return client
     return boto3.client(
         "s3",
         aws_access_key_id=aws_credentials.access_key_id,

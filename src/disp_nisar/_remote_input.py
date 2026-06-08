@@ -23,6 +23,8 @@ import h5py
 from opera_utils import is_remote_url
 from tenacity import retry, stop_after_attempt, wait_fixed
 
+from ._streaming import S3Path
+
 logger = logging.getLogger(__name__)
 
 
@@ -412,7 +414,17 @@ def parallel_s3_download(
 
     from ._streaming import get_authorized_s3_client
 
-    s3_client = get_authorized_s3_client()
+    s3_client = get_authorized_s3_client(dataset="nisar")
+    # for url in s3_urls:
+    #     out = _download_file(
+    #         s3_client,
+    #         url,
+    #         output_dir,
+    #         raw_dir,
+    #         frequencies,
+    #         polarization,
+    #     )
+    #     downloaded_files.append[out]
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_url = {}
         for url in s3_urls:
@@ -447,24 +459,21 @@ def _download_file(
     frequencies: Sequence[str],
     polarization: str,
 ) -> Path:
-    from urllib.parse import ParseResult, urlparse
+    s3_path = S3Path(url)
+    logger.info(f"Downloading {s3_path} to {output_dir}")
 
-    parsed: ParseResult = urlparse(url)
-    trailing_slash = "/" if url.endswith("/") else ""
-    s3_bucket = parsed.netloc
-    s3_path = Path(parsed.path)
-    s3_path_key = f"{str(Path(parsed.path).as_posix()).lstrip('/')}{trailing_slash}"
-
-    final = output_dir / s3_path.name
+    final = output_dir / s3_path.path.name
     if final.exists() and final.stat().st_size > 0:
         logger.info(f"Reusing cached {final.name}")
         return final
 
-    raw = raw_dir / s3_path.name
+    raw = raw_dir / s3_path.path.name
 
     if not raw.exists() or raw.stat().st_size == 0:
-        logger.info(f"Downloading {s3_path.name}")
-        s3_client.download_file(Bucket=s3_bucket, Key=s3_path_key, Filename=str(raw))
+        logger.info(f"Downloading {final.name}")
+        s3_client.download_file(
+            Bucket=s3_path.bucket, Key=s3_path.key, Filename=str(raw)
+        )
 
     logger.info(f"Downloading {url} to {final}")
 
