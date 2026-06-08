@@ -9,6 +9,7 @@ from typing import Any, Self
 import h5py
 import numpy as np
 from opera_utils import is_remote_url
+from opera_utils.credentials import ASFCredentialEndpoints, AWSCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,79 @@ try:
 except ImportError:
     HAS_EARTHACCESS = False
     logger.debug("earthaccess not available, remote streaming disabled")
+
+
+def get_earthaccess_s3_creds(
+    dataset: str | ASFCredentialEndpoints = ASFCredentialEndpoints.OPERA,
+) -> AWSCredentials:
+    """Get S3 credentials for the specified dataset.
+
+    Parameters
+    ----------
+    dataset : str, optional
+        The name of the dataset to get credentials for.
+        Options are "opera" or "sentinel1". Default is "opera".
+
+    Returns
+    -------
+    AWSCredentials
+        Object containing S3 credentials
+
+    Raises
+    ------
+    ValueError
+        If an unknown dataset is specified.
+
+    Notes
+    -----
+    Uses the `earthaccess` library to login, which requires one of the following
+    auth strategies:
+        - "all": (default) try all methods until one works
+        - "interactive": enter username and password.
+        - "netrc": retrieve username and password from ~/.netrc.
+        - "environment": retrieve username and password from
+            `$EARTHDATA_USERNAME` and `$EARTHDATA_PASSWORD`.
+
+    """
+    if isinstance(dataset, str):
+        endpoint: ASFCredentialEndpoints = getattr(ASFCredentialEndpoints, dataset)
+    else:
+        endpoint = dataset
+    return AWSCredentials.from_asf(endpoint=endpoint)
+
+
+def get_authorized_s3_client(
+    dataset: str | ASFCredentialEndpoints = ASFCredentialEndpoints.OPERA,
+    aws_credentials: AWSCredentials | None = None,
+):
+    """Get an authorized S3 client for the specified dataset.
+
+    Parameters
+    ----------
+    dataset : str, optional
+        The name of the dataset to get credentials for. Default is "opera".
+    aws_credentials : AWSCredentials, optional
+        Pre-configured s3 credentials.
+        If not provided, fetches using earthaccess
+
+    Returns
+    -------
+    boto3.S3Client
+        An authorized S3 client.
+
+    """
+    import boto3
+
+    if aws_credentials is None:
+        aws_credentials = get_earthaccess_s3_creds(dataset=dataset)
+
+    return boto3.client(
+        "s3",
+        aws_access_key_id=aws_credentials.access_key_id,
+        aws_secret_access_key=aws_credentials.secret_access_key,
+        aws_session_token=aws_credentials.session_token,
+        region_name="us-west-2",
+    )
 
 
 def authenticate_earthdata() -> Any:

@@ -18,10 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, Sequence
 
-import h5py
 import h5netcdf
-import numpy as np
+import h5py
 from opera_utils import is_remote_url
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +395,95 @@ def _download_and_trim(
     return final
 
 
+@retry(stop=stop_after_attempt(5), wait=wait_fixed(15))
+def parallel_s3_download(
+    s3_urls: Sequence[str],
+    output_dir: Path,
+    raw_dir: Path,
+    frequencies: Sequence[str],
+    polarization: str,
+    max_workers: int = 5,
+) -> list[Path]:
+    """Download using an authorized Boto client in parallel."""
+    max_workers = min(len(s3_urls), max_workers)
+    downloaded_files: list[Path] = []
+
+    import concurrent.futures
+
+    from ._streaming import get_authorized_s3_client
+
+    s3_client = get_authorized_s3_client()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {}
+        for url in s3_urls:
+            future = executor.submit(
+                _download_file,
+                s3_client,
+                url,
+                output_dir,
+                raw_dir,
+                frequencies,
+                polarization,
+            )
+            future_to_url[future] = url
+
+        for future in concurrent.futures.as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                file_path = future.result()
+                downloaded_files.append(file_path)
+            except Exception:
+                logger.exception(f"{url} generated an exception")
+                raise
+
+    return downloaded_files
+
+
+def _download_file(
+    s3_client,
+    url: str,
+    output_dir: Path,
+    raw_dir: Path,
+    frequencies: Sequence[str],
+    polarization: str,
+) -> Path:
+    from urllib.parse import ParseResult, urlparse
+
+    parsed: ParseResult = urlparse(url)
+    trailing_slash = "/" if url.endswith("/") else ""
+    s3_bucket = parsed.netloc
+    s3_path = Path(parsed.path)
+    s3_path_key = f"{str(Path(parsed.path).as_posix()).lstrip('/')}{trailing_slash}"
+
+    final = output_dir / s3_path.name
+    if final.exists() and final.stat().st_size > 0:
+        logger.info(f"Reusing cached {final.name}")
+        return final
+
+    raw = raw_dir / s3_path.name
+
+    if not raw.exists() or raw.stat().st_size == 0:
+        logger.info(f"Downloading {s3_path.name}")
+        s3_client.download_file(Bucket=s3_bucket, Key=s3_path_key, Filename=str(raw))
+
+    logger.info(f"Downloading {url} to {final}")
+
+    tmp = final.with_suffix(final.suffix + ".part")
+    logger.info(f"Extracting {polarization}@{','.join(frequencies)} from {raw}")
+    _extract_subset(raw, tmp, frequencies, polarization)
+    tmp.replace(final)
+
+    # Free disk: drop the full granule once the trimmed copy is in place.
+    try:
+        raw.unlink()
+    except OSError:
+        pass
+
+    logger.info(f"Staged {final.name} ({final.stat().st_size / 1e6:.1f} MB)")
+
+    return final
+
+
 def stage_remote_inputs(
     urls: Iterable[str | Path],
     scratch_dir: Path,
@@ -448,21 +537,34 @@ def stage_remote_inputs(
         f" {n_workers} parallel workers)"
     )
 
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        future_to_idx = {
-            pool.submit(
-                _download_and_trim,
-                url_list[i],
-                scratch_dir,
-                raw_dir,
-                frequencies,
-                polarization,
-            ): i
-            for i in remote_indices
-        }
-        for fut in as_completed(future_to_idx):
-            i = future_to_idx[fut]
-            out_paths[i] = fut.result()
+    https_urls = [u for u in url_list if u.startswith("https://")]
+    s3_urls = [u for u in url_list if u.startswith("s3://")]
+
+    if https_urls:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            future_to_idx = {
+                pool.submit(
+                    _download_and_trim,
+                    url_list[i],
+                    scratch_dir,
+                    raw_dir,
+                    frequencies,
+                    polarization,
+                ): i
+                for i in remote_indices
+            }
+            for fut in as_completed(future_to_idx):
+                i = future_to_idx[fut]
+                out_paths[i] = fut.result()
+    elif s3_urls:
+        out_paths = parallel_s3_download(
+            s3_urls=s3_urls,
+            output_dir=scratch_dir,
+            raw_dir=raw_dir,
+            frequencies=frequencies,
+            polarization=polarization,
+            max_workers=n_workers,
+        )
 
     # Best-effort cleanup of the empty raw dir.
     try:
@@ -473,7 +575,7 @@ def stage_remote_inputs(
     return [p for p in out_paths if p is not None]
 
 
-def run_dolphin_with_earthaccess(
+def run_dolphin(
     config_file: str | Path,
     debug: bool = False,
     n_workers: int = 6,
