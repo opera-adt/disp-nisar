@@ -265,8 +265,8 @@ def list_bucket(
         list of items in the bucket.
 
     """
-    import subprocess
     import json
+    import subprocess
 
     cmd = ["s5cmd", "--json", "--numworkers", str(num_workers)]
     if aws_profile:
@@ -373,28 +373,11 @@ def get_authorized_s3_client(
 
     """
     import boto3
+
     # from botocore.config import Config
 
     if aws_credentials is None:
         aws_credentials = get_earthaccess_s3_creds(dataset=dataset)
-
-    # client = boto3.client(
-    #     "s3",
-    #     aws_access_key_id=aws_credentials.access_key_id,
-    #     aws_secret_access_key=aws_credentials.secret_access_key,
-    #     aws_session_token=aws_credentials.session_token,
-    #     region_name="us-west-2",
-    #     config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
-    # )
-
-    # # Correct signature for the 'before-sign.s3' event hook
-    # # The request object inside **kwargs contains the raw HTTP headers about to be sent
-    # def add_requester_pays_header(request, **kwargs):
-    #     request.headers["x-amz-request-payer"] = "requester"
-
-    # # Register it so that EVERY operation (HeadObject, GetObject, ListObjects)
-    # # automatically signs with the Requester Pays flag appended.
-    # client.meta.events.register("before-sign.s3", add_requester_pays_header)
 
     # return client
     return boto3.client(

@@ -73,11 +73,11 @@ unwrap_options:
   run_goldstein: false
   # Whether to run interpolation step on wrapped interferogram.
   #   Type: boolean.
-  run_interpolation: true
+  run_interpolation: false
   # Phase unwrapping method.
   #   Type: string.
   #   Options: ['snaphu', 'icu', 'phass', 'spurt', 'whirlwind'].
-  unwrap_method: snaphu
+  unwrap_method: whirlwind
   # Number of interferograms to unwrap in parallel.
   #   Type: integer.
   n_parallel_jobs: 4
@@ -219,6 +219,53 @@ unwrap_options:
       #   single batch.
       #   Type: integer.
       num_parallel_ifgs: 21
+  whirlwind_options:
+    # Threads for ww's internal rayon pool. ``None`` = let ww use whatever
+    #   ``WHIRLWIND_NUM_THREADS`` / ``RAYON_NUM_THREADS`` is set externally (e.g. via
+    #   SLURM/``taskset``), falling back to all CPUs. The pool is *shared* across the
+    #   ``n_parallel_jobs`` concurrent unwraps, so the effective per-IG share is ``num_threads /
+    #   n_parallel_jobs``.
+    #   Type: integer | null.
+    num_threads:
+    # Enable the spiral PS interpolation pre-pass: every valid pixel with coherence below
+    #   ``interp_cutoff`` is filled from nearby high-coherence pixels before unwrapping.
+    #   Type: boolean.
+    interpolate: false
+    # Coherence below which a valid pixel is interpolated.
+    #   Type: number.
+    interp_cutoff: 0.5
+    # Nearest high-coherence pixels averaged per interpolated pixel.
+    #   Type: integer.
+    interp_num_neighbors: 20
+    # Maximum search radius (pixels) for the spiral neighbor search.
+    #   Type: integer.
+    interp_max_radius: 51
+    # Minimum search radius (pixels); closer neighbors are skipped.
+    #   Type: integer.
+    interp_min_radius: 0
+    # Gaussian distance-weighting falloff for the neighbor average.
+    #   Type: number.
+    interp_alpha: 0.75
+    # Connected-component boundary threshold in raw cost units. Larger makes more boundaries and
+    #   smaller, safer components.
+    #   Type: integer.
+    cost_threshold: 50
+    # Set ``cost_threshold`` from a Gaussian-equivalent noise level (~3.5 reproduces the default
+    #   50). Higher is stricter (more boundaries). Takes precedence over ``cost_threshold`` and
+    #   ``conncomp_cycle_prob``.
+    #   Type: number | null.
+    conncomp_sigma:
+    # Set ``cost_threshold`` from a target per-edge one-cycle-correction probability (~2.4e-4
+    #   matches the default). Lower is stricter. Overridden by ``conncomp_sigma`` if both are
+    #   set.
+    #   Type: number | null.
+    conncomp_cycle_prob:
+    # Discard connected components smaller than this many pixels.
+    #   Type: integer.
+    min_size_px: 100
+    # Maximum number of connected components to keep (largest first).
+    #   Type: integer.
+    max_ncomps: 1024
 timeseries_options:
   # Whether to run the inversion step after unwrapping, if more than  a single-reference
   #   network is used.
