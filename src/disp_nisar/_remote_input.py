@@ -33,6 +33,8 @@ _ALWAYS_KEEP_GROUPS = (
     "/science/LSAR/identification",
     "/science/LSAR/GSLC/metadata/radarGrid",
     "/science/LSAR/GSLC/metadata/orbit",
+    "/science/LSAR/GSLC/metadata/sourceData/swaths",
+    "/science/LSAR/GSLC/metadata/sourceData/processingInformation/parameters/frequencyA",
 )
 
 # Groups copied wholesale for gunw.
