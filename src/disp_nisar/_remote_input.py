@@ -18,8 +18,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import h5netcdf
 import h5py
 from opera_utils import is_remote_url
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+from ._streaming import S3Path
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +33,12 @@ _ALWAYS_KEEP_GROUPS = (
     "/science/LSAR/identification",
     "/science/LSAR/GSLC/metadata/radarGrid",
     "/science/LSAR/GSLC/metadata/orbit",
+    "/science/LSAR/GSLC/metadata/sourceData/swaths",
+    "/science/LSAR/GSLC/metadata/sourceData/processingInformation/parameters/frequencyA",
 )
+
+# Groups copied wholesale for gunw.
+_ALWAYS_KEEP_GROUPS_GUNW = ("/science/LSAR/identification",)
 
 # Per-frequency grid datasets kept besides the chosen polarization.
 _GRID_AUX_DATASETS = (
@@ -40,6 +49,27 @@ _GRID_AUX_DATASETS = (
     "yCoordinateSpacing",
     "centerFrequency",
     "listOfPolarizations",
+    "mask",
+)
+
+# Per-frequency grid datasets kept besides the chosen polarization for gunw.
+_GRID_AUX_DATASETS_GUNW = (
+    "projection",
+    "xCoordinates",
+    "yCoordinates",
+    "xCoordinateSpacing",
+    "yCoordinateSpacing",
+    "mask",
+)
+
+# Per-frequency grid datasets kept from the chosen polarization for gunw.
+_GRID_AUX_DATASETS_GUNW_POL = (
+    "ionospherePhaseScreen",
+    "projection",
+    "xCoordinates",
+    "yCoordinates",
+    "xCoordinateSpacing",
+    "yCoordinateSpacing",
     "mask",
 )
 
@@ -63,24 +93,144 @@ def _extract_subset(
     copied into the same staged file while the frequency-agnostic metadata
     groups are copied only once.
     """
-    with h5py.File(src_path, "r") as src, h5py.File(dst_path, "w") as dst:
-        for k, v in src.attrs.items():
-            dst.attrs[k] = v
+    if "GSLC" in str(src_path):
+        with h5py.File(src_path, "r") as src, h5py.File(dst_path, "w") as dst:
+            for k, v in src.attrs.items():
+                dst.attrs[k] = v
 
-        for grp in _ALWAYS_KEEP_GROUPS:
-            if grp in src and grp not in dst:
-                src.copy(grp, dst, name=grp)
+            for grp in _ALWAYS_KEEP_GROUPS:
+                if grp in src and grp not in dst:
+                    src.copy(grp, dst, name=grp)
 
-        for frequency in frequencies:
-            grid = f"/science/LSAR/GSLC/grids/{frequency}"
-            # Order matters: aux/coord datasets first so dimension scales exist
-            # before the polarization dataset is copied.
-            for name in (*_GRID_AUX_DATASETS, polarization):
-                src_path_h5 = f"{grid}/{name}"
-                if src_path_h5 in src and src_path_h5 not in dst:
-                    src.copy(src_path_h5, dst, name=src_path_h5)
+            for frequency in frequencies:
+                grid = f"/science/LSAR/GSLC/grids/{frequency}"
+                # Order matters: aux/coord datasets first so dimension scales exist
+                # before the polarization dataset is copied.
+                for name in (*_GRID_AUX_DATASETS, polarization):
+                    src_path_h5 = f"{grid}/{name}"
+                    if src_path_h5 in src and src_path_h5 not in dst:
+                        src.copy(src_path_h5, dst, name=src_path_h5)
 
-            _rebuild_dimension_scales(dst, grid, polarization)
+                _rebuild_dimension_scales(dst, grid, polarization)
+    elif "GUNW" in str(src_path):
+        # 1. Open the source file normally with h5py
+        # 2. Open the destination using h5netcdf (which forces NetCDF compliance)
+        with (
+            h5py.File(src_path, "r") as src,
+            h5netcdf.File(dst_path, "w") as dst,
+        ):
+            # 1. Copy global attributes
+            for k, v in src.attrs.items():
+                dst.attrs[k] = v
+
+            def copy_structure(full_group_path, include_datasets=None):
+                if full_group_path not in src:
+                    return
+
+                src_grp = src[full_group_path]
+
+                try:
+                    dst_grp = dst.create_group(full_group_path)
+                except ValueError:
+                    dst_grp = dst.groups[full_group_path]
+
+                # Set of attributes that netCDF-4 uses internally and will reject if
+                # written manually
+                RESERVED_ATTRS = {
+                    "DIMENSION_LIST",
+                    "REFERENCE_LIST",
+                    "CLASS",
+                    "NAME",
+                    "_Netcdf4Dimid",
+                    "_Netcdf4Coordinates",
+                }
+
+                # Step 1: Pre-register coordinate dimensions if they are in your
+                # whitelist. This guarantees that NetCDF creates a shared dimension
+                # scale for 2D rasters
+                for coord_name in ["xCoordinates", "yCoordinates"]:
+                    if coord_name in src_grp and isinstance(
+                        src_grp[coord_name], h5py.Dataset
+                    ):
+                        if include_datasets is None or coord_name in include_datasets:
+                            coord_ds = src_grp[coord_name]
+                            if coord_name not in dst_grp.dimensions:
+                                dst_grp.dimensions[coord_name] = coord_ds.shape[0]
+
+                # Step 2: Determine which items to copy
+                # If include_datasets is provided, we only iterate over those
+                # specific names
+                items_to_copy = (
+                    src_grp.keys() if include_datasets is None else include_datasets
+                )
+
+                for name in items_to_copy:
+                    if name not in src_grp:
+                        continue
+                    item = src_grp[name]
+
+                    if isinstance(item, h5py.Dataset):
+                        dims = []
+
+                        # Map the raster to its correct dimensions to preserve NetCDF
+                        # compatibility
+                        if name in ["xCoordinates", "yCoordinates"]:
+                            dims = [name]
+                        elif item.ndim == 2:
+                            # NISAR convention for 2D rasters: (yCoordinates,
+                            # xCoordinates)
+                            dim_y = (
+                                "yCoordinates"
+                                if "yCoordinates" in dst_grp.dimensions
+                                else f"{name}_dim_0"
+                            )
+                            dim_x = (
+                                "xCoordinates"
+                                if "xCoordinates" in dst_grp.dimensions
+                                else f"{name}_dim_1"
+                            )
+
+                            if dim_y not in dst_grp.dimensions:
+                                dst_grp.dimensions[dim_y] = item.shape[0]
+                            if dim_x not in dst_grp.dimensions:
+                                dst_grp.dimensions[dim_x] = item.shape[1]
+                            dims = [dim_y, dim_x]
+                        else:
+                            # Fallback for 1D or 3D ancillary arrays
+                            for i, dim_len in enumerate(item.shape):
+                                dim_name = f"{name}_dim_{i}"
+                                if dim_name not in dst_grp.dimensions:
+                                    dst_grp.dimensions[dim_name] = dim_len
+                                dims.append(dim_name)
+
+                        var = dst_grp.create_variable(
+                            name, data=item[...], dimensions=dims
+                        )
+
+                        # Copy variable attributes, skipping system-reserved ones
+                        for k, v in item.attrs.items():
+                            if k not in RESERVED_ATTRS:
+                                var.attrs[k] = v
+
+            # 2. Copy standard groups
+            for grp in _ALWAYS_KEEP_GROUPS_GUNW:
+                copy_structure(grp)
+
+            # 3. Copy frequency grid pathways
+            for frequency in frequencies:
+                grid = f"/science/LSAR/GUNW/grids/{frequency}/unwrappedInterferogram"
+
+                # Copy the base grid datasets (like xCoordinates, yCoordinates)
+                copy_structure(grid, include_datasets=_GRID_AUX_DATASETS_GUNW)
+
+                # Copy the polarization sub-group (like HH, VV or ionospherePhaseScreen)
+                copy_structure(
+                    f"{grid}/{polarization}",
+                    include_datasets=_GRID_AUX_DATASETS_GUNW_POL,
+                )
+
+    else:
+        logger.info(f"{src_path} not recognized for subsetting")
 
 
 def _rebuild_dimension_scales(dst: h5py.File, grid: str, polarization: str) -> None:
@@ -91,6 +241,7 @@ def _rebuild_dimension_scales(dst: h5py.File, grid: str, polarization: str) -> N
     pol_path = f"{grid}/{polarization}"
     x_path = f"{grid}/xCoordinates"
     y_path = f"{grid}/yCoordinates"
+
     if pol_path not in dst or x_path not in dst or y_path not in dst:
         return
 
@@ -248,7 +399,103 @@ def _download_and_trim(
     return final
 
 
-def stage_remote_gslcs(
+@retry(stop=stop_after_attempt(5), wait=wait_fixed(15))
+def parallel_s3_download(
+    s3_urls: Sequence[str],
+    output_dir: Path,
+    raw_dir: Path,
+    frequencies: Sequence[str],
+    polarization: str,
+    max_workers: int = 5,
+) -> list[Path]:
+    """Download using an authorized Boto client in parallel."""
+    max_workers = min(len(s3_urls), max_workers)
+    downloaded_files: list[Path] = []
+
+    import concurrent.futures
+
+    from ._streaming import get_authorized_s3_client
+
+    s3_client = get_authorized_s3_client(dataset="nisar")
+    # for url in s3_urls:
+    #     out = _download_file(
+    #         s3_client,
+    #         url,
+    #         output_dir,
+    #         raw_dir,
+    #         frequencies,
+    #         polarization,
+    #     )
+    #     downloaded_files.append[out]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {}
+        for url in s3_urls:
+            future = executor.submit(
+                _download_file,
+                s3_client,
+                url,
+                output_dir,
+                raw_dir,
+                frequencies,
+                polarization,
+            )
+            future_to_url[future] = url
+
+        for future in concurrent.futures.as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                file_path = future.result()
+                downloaded_files.append(file_path)
+            except Exception:
+                logger.exception(f"{url} generated an exception")
+                raise
+
+    return downloaded_files
+
+
+def _download_file(
+    s3_client,
+    url: str,
+    output_dir: Path,
+    raw_dir: Path,
+    frequencies: Sequence[str],
+    polarization: str,
+) -> Path:
+    s3_path = S3Path(url)
+    logger.info(f"Downloading {s3_path} to {output_dir}")
+
+    final = output_dir / s3_path.path.name
+    if final.exists() and final.stat().st_size > 0:
+        logger.info(f"Reusing cached {final.name}")
+        return final
+
+    raw = raw_dir / s3_path.path.name
+
+    if not raw.exists() or raw.stat().st_size == 0:
+        logger.info(f"Downloading {final.name}")
+        s3_client.download_file(
+            Bucket=s3_path.bucket, Key=s3_path.key, Filename=str(raw)
+        )
+
+    logger.info(f"Downloading {url} to {final}")
+
+    tmp = final.with_suffix(final.suffix + ".part")
+    logger.info(f"Extracting {polarization}@{','.join(frequencies)} from {raw}")
+    _extract_subset(raw, tmp, frequencies, polarization)
+    tmp.replace(final)
+
+    # Free disk: drop the full granule once the trimmed copy is in place.
+    try:
+        raw.unlink()
+    except OSError:
+        pass
+
+    logger.info(f"Staged {final.name} ({final.stat().st_size / 1e6:.1f} MB)")
+
+    return final
+
+
+def stage_remote_inputs(
     urls: Iterable[str | Path],
     scratch_dir: Path,
     frequencies: Sequence[str] = ("frequencyA",),
@@ -277,7 +524,7 @@ def stage_remote_gslcs(
     """
     import earthaccess
 
-    scratch_dir = Path(scratch_dir)
+    scratch_dir = Path(scratch_dir).resolve()
     scratch_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = scratch_dir / "_raw"
     raw_dir.mkdir(exist_ok=True)
@@ -290,7 +537,7 @@ def stage_remote_gslcs(
     out_paths: list[Path | None] = [None] * len(url_list)
     for i, u in enumerate(url_list):
         if not is_remote_url(u):
-            out_paths[i] = Path(u)
+            out_paths[i] = Path(u).resolve()
 
     if not remote_indices:
         return [p for p in out_paths if p is not None]
@@ -301,21 +548,34 @@ def stage_remote_gslcs(
         f" {n_workers} parallel workers)"
     )
 
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        future_to_idx = {
-            pool.submit(
-                _download_and_trim,
-                url_list[i],
-                scratch_dir,
-                raw_dir,
-                frequencies,
-                polarization,
-            ): i
-            for i in remote_indices
-        }
-        for fut in as_completed(future_to_idx):
-            i = future_to_idx[fut]
-            out_paths[i] = fut.result()
+    https_urls = [u for u in url_list if u.startswith("https://")]
+    s3_urls = [u for u in url_list if u.startswith("s3://")]
+
+    if https_urls:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            future_to_idx = {
+                pool.submit(
+                    _download_and_trim,
+                    url_list[i],
+                    scratch_dir,
+                    raw_dir,
+                    frequencies,
+                    polarization,
+                ): i
+                for i in remote_indices
+            }
+            for fut in as_completed(future_to_idx):
+                i = future_to_idx[fut]
+                out_paths[i] = fut.result()
+    elif s3_urls:
+        out_paths = parallel_s3_download(
+            s3_urls=s3_urls,
+            output_dir=scratch_dir,
+            raw_dir=raw_dir,
+            frequencies=frequencies,
+            polarization=polarization,
+            max_workers=n_workers,
+        )
 
     # Best-effort cleanup of the empty raw dir.
     try:
@@ -326,7 +586,7 @@ def stage_remote_gslcs(
     return [p for p in out_paths if p is not None]
 
 
-def run_dolphin_with_earthaccess(
+def run_dolphin(
     config_file: str | Path,
     debug: bool = False,
     n_workers: int = 6,
@@ -337,8 +597,10 @@ def run_dolphin_with_earthaccess(
 
     pge_runconfig = RunConfig.from_yaml(str(config_file))
 
-    scratch_dir = pge_runconfig.product_path_group.scratch_path / "stage_inputs"
+    scratch_gslc_dir = pge_runconfig.product_path_group.scratch_path / "gslc"
+    scratch_gunw_dir = pge_runconfig.product_path_group.scratch_path / "gunw"
     gslc_files = pge_runconfig.input_file_group.gslc_file_list
+    gunw_files = pge_runconfig.dynamic_ancillary_file_group.gunw_files
     if any(is_remote_url(f) for f in gslc_files):
         frequency = pge_runconfig.input_file_group.frequency
         if not isinstance(frequency, str):
@@ -356,14 +618,32 @@ def run_dolphin_with_earthaccess(
             if "frequencyB" not in frequencies:
                 frequencies.append("frequencyB")
 
-        local_files = stage_remote_gslcs(
+        local_files = stage_remote_inputs(
             gslc_files,
-            scratch_dir=Path(scratch_dir),
+            scratch_dir=Path(scratch_gslc_dir),
             frequencies=frequencies,
             polarization=polarization,
             n_workers=n_workers,
         )
         pge_runconfig.input_file_group.gslc_file_list = local_files
+    if len(gunw_files) > 0 and any(is_remote_url(f) for f in gunw_files):
+        frequency = pge_runconfig.input_file_group.frequency
+        if not isinstance(frequency, str):
+            frequency = frequency.value
+        polarization = pge_runconfig.input_file_group.polarization
+        if not isinstance(polarization, str):
+            polarization = polarization.value
+
+        frequencies = [frequency]
+
+        local_files_gunw = stage_remote_inputs(
+            gunw_files,
+            scratch_dir=Path(scratch_gunw_dir),
+            frequencies=frequencies,
+            polarization=polarization,
+            n_workers=n_workers,
+        )
+        pge_runconfig.dynamic_ancillary_file_group.gunw_files = local_files_gunw
 
     cfg = pge_runconfig.to_workflow()
     run(cfg, pge_runconfig=pge_runconfig, debug=debug)

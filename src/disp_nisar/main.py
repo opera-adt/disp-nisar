@@ -232,13 +232,8 @@ def run(
     assert out_paths.timeseries_residual_paths is not None
 
     # The block outputs have been stitched into full-frame rasters; everything
-    # downstream (timeseries, ionosphere, create_products) reads those or the
-    # compressed SLCs. Prune the per-block intermediates now, keeping the
-    # compressed SLCs that create_products collects into compressed_slcs/.
-    _prune_block_dirs(
-        cfg.work_directory,
-        keep_files=[p for paths in out_paths.comp_slc_dict.values() for p in paths],
-    )
+    # downstream (timeseries, ionosphere, create_products) reads those.
+    _prune_block_dirs(cfg.work_directory)
 
     # Handle forward mode re-referencing
     if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":

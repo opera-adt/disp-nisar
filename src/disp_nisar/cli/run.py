@@ -20,9 +20,9 @@ def run_main(config_file: str, debug: bool = False) -> None:
     # If any inputs are remote URLs, stage them locally first to avoid
     # GDAL/HDF5 driver authentication issues with NASA Earthdata HTTPS.
     if any(is_remote_url(f) for f in pge_runconfig.input_file_group.gslc_file_list):
-        from disp_nisar._remote_input import run_dolphin_with_earthaccess
+        from disp_nisar._remote_input import run_dolphin
 
-        run_dolphin_with_earthaccess(config_file=config_file, debug=debug)
+        run_dolphin(config_file=config_file, debug=debug)
         return
 
     cfg = pge_runconfig.to_workflow()

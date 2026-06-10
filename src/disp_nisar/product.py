@@ -1975,7 +1975,7 @@ def copy_cslc_metadata_to_displacement(
     output_disp_file: Filename,
 ) -> None:
     """Copy metadata from input reference/secondary CSLC files to DISP output."""
-    dsets_to_copy = [("/metadata/orbit", None)]  #          Group
+    dsets_to_copy = [("/science/LSAR/GSLC/metadata/orbit", None)]  #          Group
     for cslc_file, prepend_str in zip(
         [reference_cslc_file, secondary_cslc_file], ["reference_", "secondary_"]
     ):
