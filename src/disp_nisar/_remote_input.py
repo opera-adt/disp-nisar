@@ -14,13 +14,15 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, NamedTuple, Sequence
 
 import h5netcdf
 import h5py
 from opera_utils import is_remote_url
+from opera_utils._types import PathOrStr
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 from ._streaming import S3Path
@@ -417,16 +419,7 @@ def parallel_s3_download(
     from ._streaming import get_authorized_s3_client
 
     s3_client = get_authorized_s3_client(dataset="nisar")
-    # for url in s3_urls:
-    #     out = _download_file(
-    #         s3_client,
-    #         url,
-    #         output_dir,
-    #         raw_dir,
-    #         frequencies,
-    #         polarization,
-    #     )
-    #     downloaded_files.append[out]
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_url = {}
         for url in s3_urls:
@@ -493,6 +486,128 @@ def _download_file(
     logger.info(f"Staged {final.name} ({final.stat().st_size / 1e6:.1f} MB)")
 
     return final
+
+
+class SubsetResult(NamedTuple):
+    url: str
+    output: str
+    error: str
+
+
+def download_and_subset_from_private_bucket(
+    urls: Sequence[str],
+    raw_dir: PathOrStr,
+    output_dir: PathOrStr,
+    frequencies: Sequence[str],
+    polarization: str,
+    *,
+    num_workers: int = 4,
+    per_file_concurrency: int = 8,
+    aws_profile: str | None = None,
+) -> list:
+    """Download each ``s3://bucket/key`` URL, subset it, delete the original.
+
+    Each URL is handled as one unit: download -> ``_extract_subset`` -> delete.
+    A bounded thread pool runs at most ``num_workers`` units at once, so peak local
+    disk stays ~ ``num_workers x (original + subset)``. Downloads overlap; the h5py
+    repack is serialised behind a lock because HDF5 is not thread-safe.
+
+    ``_extract_subset`` must be importable in the enclosing scope.
+
+    Returns a list of ``SubsetResult(url, output, error)`` named tuples.
+    """
+    from urllib.parse import urlparse
+
+    import boto3
+    from boto3.s3.transfer import TransferConfig
+    from botocore.config import Config
+
+    log = logging.getLogger(__name__)
+
+    urls = list(urls)
+    if not urls:
+        log.warning("no urls given")
+        return []
+
+    download_dir = Path(raw_dir)
+    output_dir = Path(output_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # One client, shared across threads. The pool must hold enough connections for
+    # every worker to run its own multipart download at the same time.
+    session = boto3.Session(profile_name=aws_profile)
+    client = session.client(
+        "s3",
+        config=Config(
+            max_pool_connections=num_workers * per_file_concurrency + 4,
+            retries={"max_attempts": 10, "mode": "adaptive"},
+        ),
+    )
+    transfer_config = TransferConfig(max_concurrency=per_file_concurrency)
+    repack_lock = threading.Lock()
+
+    def _split(url: str) -> tuple[str, str]:
+        p = urlparse(url)
+        if p.scheme != "s3" or not p.netloc or not p.path.strip("/"):
+            raise ValueError(f"not an s3://bucket/key url: {url!r}")
+        return p.netloc, p.path.lstrip("/")
+
+    def _one(url: str) -> SubsetResult:
+        try:
+            bucket, key = _split(url)
+        except ValueError as e:
+            return SubsetResult(url, "None", str(e))
+
+        local = download_dir / Path(key).name
+        dst = output_dir / Path(key).name
+
+        # 1) download
+        try:
+            client.download_file(bucket, key, str(local), Config=transfer_config)
+        except Exception as e:  # noqa: BLE001
+            local.unlink(missing_ok=True)  # drop any partial file
+            log.exception("download failed: %s", url)
+            return SubsetResult(url, "None", f"download failed: {e}")
+
+        # 2) subset / repack (serialised: HDF5 is not thread-safe)
+        try:
+            with repack_lock:
+                _extract_subset(local, dst, frequencies, polarization)
+        except Exception as e:  # noqa: BLE001
+            dst.unlink(missing_ok=True)  # drop partial subset
+            # Keep the original so the repack can be retried without re-downloading.
+            log.exception("subset failed (original kept): %s", url)
+            return SubsetResult(url, "None", f"subset failed: {e}")
+
+        # `_extract_subset` no-ops for unrecognised products: only delete the
+        # original if a subset was actually written.
+        if not dst.exists():
+            log.info("no subset produced for %s (unrecognised product?)", url)
+            return SubsetResult(url, "None", "None")
+
+        local.unlink(missing_ok=True)
+        return SubsetResult(url, dst, "None")
+
+    log.info(
+        "%d urls; starting bounded pipeline (num_workers=%d, per_file_concurrency=%d)",
+        len(urls),
+        num_workers,
+        per_file_concurrency,
+    )
+
+    results: list = []
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        futures = {pool.submit(_one, url): url for url in urls}
+        for i, fut in enumerate(as_completed(futures), start=1):
+            res = fut.result()
+            results.append(res)
+            status = "ok" if res.error == "None" else f"ERROR ({res.error})"
+            log.info("[%d/%d] %s -> %s", i, len(urls), res.url, status)
+
+    n_ok = sum(r.error == "None" for r in results)
+    log.info("done: %d ok, %d failed", n_ok, len(results) - n_ok)
+    return results
 
 
 def stage_remote_inputs(
@@ -568,14 +683,23 @@ def stage_remote_inputs(
                 i = future_to_idx[fut]
                 out_paths[i] = fut.result()
     elif s3_urls:
-        out_paths = parallel_s3_download(
-            s3_urls=s3_urls,
-            output_dir=scratch_dir,
-            raw_dir=raw_dir,
-            frequencies=frequencies,
-            polarization=polarization,
-            max_workers=n_workers,
-        )
+        try:
+            out_paths = parallel_s3_download(
+                s3_urls=s3_urls,
+                output_dir=scratch_dir,
+                raw_dir=raw_dir,
+                frequencies=frequencies,
+                polarization=polarization,
+                max_workers=n_workers,
+            )
+        except Exception:
+            out_paths = download_and_subset_from_private_bucket(
+                urls=s3_urls,
+                raw_dir=raw_dir,
+                output_dir=scratch_dir,
+                frequencies=frequencies,
+                polarization=polarization,
+            )
 
     # Best-effort cleanup of the empty raw dir.
     try:
