@@ -73,11 +73,11 @@ unwrap_options:
   run_goldstein: false
   # Whether to run interpolation step on wrapped interferogram.
   #   Type: boolean.
-  run_interpolation: false
+  run_interpolation: true
   # Phase unwrapping method.
   #   Type: string.
   #   Options: ['snaphu', 'icu', 'phass', 'spurt', 'whirlwind'].
-  unwrap_method: whirlwind
+  unwrap_method: snaphu
   # Number of interferograms to unwrap in parallel.
   #   Type: integer.
   n_parallel_jobs: 4
