@@ -564,7 +564,8 @@ def download_and_subset_from_private_bucket(
 
         # 1) download
         try:
-            client.download_file(bucket, key, str(local), Config=transfer_config)
+            if not dst.exists():
+                client.download_file(bucket, key, str(local), Config=transfer_config)
         except Exception as e:  # noqa: BLE001
             local.unlink(missing_ok=True)  # drop any partial file
             log.exception("download failed: %s", url)
@@ -573,7 +574,8 @@ def download_and_subset_from_private_bucket(
         # 2) subset / repack (serialised: HDF5 is not thread-safe)
         try:
             with repack_lock:
-                _extract_subset(local, dst, frequencies, polarization)
+                if local.exists():
+                    _extract_subset(local, dst, frequencies, polarization)
         except Exception as e:  # noqa: BLE001
             dst.unlink(missing_ok=True)  # drop partial subset
             # Keep the original so the repack can be retried without re-downloading.
@@ -607,7 +609,7 @@ def download_and_subset_from_private_bucket(
 
     n_ok = sum(r.error == "None" for r in results)
     log.info("done: %d ok, %d failed", n_ok, len(results) - n_ok)
-    return results
+    return [r.output for r in results]
 
 
 def stage_remote_inputs(
@@ -665,6 +667,8 @@ def stage_remote_inputs(
 
     https_urls = [u for u in url_list if u.startswith("https://")]
     s3_urls = [u for u in url_list if u.startswith("s3://")]
+    s3_urls_private = [u for u in s3_urls if "cumulus" not in u]
+    s3_urls_asf = [u for u in s3_urls if u not in s3_urls_private]
 
     if https_urls:
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -682,24 +686,23 @@ def stage_remote_inputs(
             for fut in as_completed(future_to_idx):
                 i = future_to_idx[fut]
                 out_paths[i] = fut.result()
-    elif s3_urls:
-        try:
-            out_paths = parallel_s3_download(
-                s3_urls=s3_urls,
-                output_dir=scratch_dir,
-                raw_dir=raw_dir,
-                frequencies=frequencies,
-                polarization=polarization,
-                max_workers=n_workers,
-            )
-        except Exception:
-            out_paths = download_and_subset_from_private_bucket(
-                urls=s3_urls,
-                raw_dir=raw_dir,
-                output_dir=scratch_dir,
-                frequencies=frequencies,
-                polarization=polarization,
-            )
+    elif s3_urls_private:
+        out_paths = download_and_subset_from_private_bucket(
+            urls=s3_urls_private,
+            raw_dir=raw_dir,
+            output_dir=scratch_dir,
+            frequencies=frequencies,
+            polarization=polarization,
+        )
+    else:
+        out_paths = parallel_s3_download(
+            s3_urls=s3_urls_asf,
+            output_dir=scratch_dir,
+            raw_dir=raw_dir,
+            frequencies=frequencies,
+            polarization=polarization,
+            max_workers=n_workers,
+        )
 
     # Best-effort cleanup of the empty raw dir.
     try:
