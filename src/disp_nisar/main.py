@@ -233,7 +233,7 @@ def run(
 
     # The block outputs have been stitched into full-frame rasters; everything
     # downstream (timeseries, ionosphere, create_products) reads those.
-    _prune_block_dirs(cfg.work_directory)
+    # _prune_block_dirs(cfg.work_directory)
 
     # Handle forward mode re-referencing
     if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":
@@ -282,12 +282,31 @@ def run(
         # Note: implement and test carying compressed slcs
         # with forward/historical mode, for workflow with freqB
         # probably keep it same as freqA to keep it consistent
-        run_displacement(cfg=cfg_freqB, debug=debug, raise_on_empty=False)
+        out_paths_freqB = run_displacement(
+            cfg=cfg_freqB, debug=debug, raise_on_empty=False
+        )
+
+        assert out_paths_freqB.timeseries_paths is not None
+        assert out_paths_freqB.timeseries_residual_paths is not None
+
+        if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":
+            from dolphin.timeseries import _redo_reference
+
+            logger.info(
+                f"Re-referencing time series rasters {out_paths_freqB.timeseries_paths}"
+            )
+            logger.info(f"Setting output reference to {second_to_last_date}")
+            _redo_reference(
+                out_paths_freqB.timeseries_paths,
+                out_paths_freqB.timeseries_residual_paths,
+                second_to_last_date,
+                bad_pixel_mask=np.ma.nomask,
+            )
 
         # freqB only feeds split-spectrum ionosphere via its timeseries (built
         # from the stitched result) and its compressed SLCs are not carried
         # forward, so clear its per-block trees entirely.
-        _prune_block_dirs(cfg_freqB.work_directory)
+        # _prune_block_dirs(cfg_freqB.work_directory)
 
         # Run split-spectrum ionosphere estimation for freq.B and freq.A
         # use runconfigs as input to run_ionosphere_estimation.
@@ -298,6 +317,7 @@ def run(
                 ts_dir_A=cfg.work_directory / "timeseries",  # TODO: use out_paths
                 ts_dir_B=cfg_freqB.work_directory / "timeseries",
                 out_dir=cfg.work_directory / "ionosphere",
+                output_timeseries_paths=out_paths.timeseries_paths,
                 f_A=f_A,
                 f_B=f_B,
                 smooth_sigma=5.0,  # expose smoothing as a parameter.
