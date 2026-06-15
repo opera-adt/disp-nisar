@@ -66,9 +66,9 @@ COPY --chown=$MAMBA_USER:$MAMBA_USER docker/specfile.txt /tmp/specfile.txt
 # "Operation too slow"), which would otherwise fail the whole build on a single
 # flaky transfer. Retry the install a few times before giving up.
 RUN for attempt in 1 2 3 4 5; do \
-        micromamba install --yes --channel conda-forge -n base -f /tmp/specfile.txt && break; \
-        if [ "$attempt" = "5" ]; then echo "micromamba install failed after $attempt attempts" && exit 1; fi; \
-        echo "micromamba install attempt $attempt stalled; retrying in 15s..." && sleep 15; \
+    micromamba install --yes --channel conda-forge -n base -f /tmp/specfile.txt && break; \
+    if [ "$attempt" = "5" ]; then echo "micromamba install failed after $attempt attempts" && exit 1; fi; \
+    echo "micromamba install attempt $attempt stalled; retrying in 15s..." && sleep 15; \
     done && \
     micromamba clean --all --yes
 
@@ -82,8 +82,8 @@ ARG MAMBA_DOCKERFILE_ACTIVATE=1
 # satisfies spurt's `numpy>=1.23`, so install without the constraint.
 RUN pip install git+https://github.com/isce-framework/spurt@v0.1.1
 # --no-deps because they are installed with conda
-RUN pip install rich && pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.25.7
-RUN pip install tyro && pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.42.6
+RUN pip install rich && pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.25.8
+RUN pip install tyro && pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.42.7
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER . .
 RUN python -m pip install --no-deps .
