@@ -289,6 +289,7 @@ def run_ionosphere_estimation(
     ts_dir_A: str | Path,
     ts_dir_B: str | Path,
     out_dir: str | Path,
+    output_timeseries_paths: list[Path],
     f_A: float,
     f_B: float,
     ref_point_file: str | Path | None = None,
@@ -314,6 +315,9 @@ def run_ionosphere_estimation(
         Directory with freqB displacement TIFs (same date-pair stems).
     out_dir : str or Path
         Root output directory (created if absent).
+    output_timeseries_paths : list[Path]
+        The list of output timeseries files which we need ionospheric
+        corrections for
     f_A, f_B : float
         Center frequencies in Hz.
     ref_point_file : str or Path or None
@@ -355,8 +359,18 @@ def run_ionosphere_estimation(
     for d in [iono_dir, corr_dir, nondisp_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
-    files_A = sorted(f for f in ts_dir_A.glob("2*.tif") if "iono" not in f.name)
-    files_B = sorted(f for f in ts_dir_B.glob("2*.tif") if "iono" not in f.name)
+    ts_names = {f.name for f in output_timeseries_paths}
+    files_A = sorted(
+        f
+        for f in ts_dir_A.glob("2*.tif")
+        if "iono" not in f.name and f.name in ts_names
+    )
+    files_B = sorted(
+        f
+        for f in ts_dir_B.glob("2*.tif")
+        if "iono" not in f.name and f.name in ts_names
+    )
+
     map_B = {f.stem: f for f in files_B}
 
     if not files_A:
@@ -366,9 +380,9 @@ def run_ionosphere_estimation(
 
     print(f"FreqA: {len(files_A)} pairs  |  FreqB: {len(map_B)} pairs")
     print(
-        f"f_A={f_A/1e9:.4f} GHz  f_B={f_B/1e9:.4f} GHz  "
-        f"λ_A={freq_to_wavelength(f_A)*100:.2f} cm  "
-        f"λ_B={freq_to_wavelength(f_B)*100:.2f} cm"
+        f"f_A={f_A / 1e9:.4f} GHz  f_B={f_B / 1e9:.4f} GHz  "
+        f"λ_A={freq_to_wavelength(f_A) * 100:.2f} cm  "
+        f"λ_B={freq_to_wavelength(f_B) * 100:.2f} cm"
     )
     print(f"Smoothing σ={smooth_sigma} px\n")
 
@@ -440,7 +454,7 @@ def run_ionosphere_estimation(
         iono = result["iono_disp_m"]
         print(
             f"iono [{np.nanmin(iono):.4f}, {np.nanmax(iono):.4f}] m  "
-            f"B_offset={result['ref_offset_B_m']*100:.2f} cm  "
+            f"B_offset={result['ref_offset_B_m'] * 100:.2f} cm  "
             f"valid={result['mask'].sum():,}"
         )
         results.append((stem, iono_path, corrected_path))
