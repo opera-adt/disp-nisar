@@ -233,7 +233,7 @@ def run(
 
     # The block outputs have been stitched into full-frame rasters; everything
     # downstream (timeseries, ionosphere, create_products) reads those.
-    # _prune_block_dirs(cfg.work_directory)
+    _prune_block_dirs(cfg.work_directory)
 
     # Handle forward mode re-referencing
     if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":
@@ -306,7 +306,7 @@ def run(
         # freqB only feeds split-spectrum ionosphere via its timeseries (built
         # from the stitched result) and its compressed SLCs are not carried
         # forward, so clear its per-block trees entirely.
-        # _prune_block_dirs(cfg_freqB.work_directory)
+        _prune_block_dirs(cfg_freqB.work_directory)
 
         # Run split-spectrum ionosphere estimation for freq.B and freq.A
         # use runconfigs as input to run_ionosphere_estimation.
