@@ -82,7 +82,7 @@ ARG MAMBA_DOCKERFILE_ACTIVATE=1
 # satisfies spurt's `numpy>=1.23`, so install without the constraint.
 RUN pip install git+https://github.com/isce-framework/spurt@v0.1.1
 # --no-deps because they are installed with conda
-RUN pip install rich && pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.25.8
+RUN pip install rich rioxarray geopandas && pip install --no-deps git+https://github.com/opera-adt/opera-utils@v0.25.8
 RUN pip install tyro && pip install --no-deps git+https://github.com/isce-framework/dolphin@v0.42.7
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER . .
