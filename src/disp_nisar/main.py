@@ -261,12 +261,15 @@ def run(
     wavelength = _frequency_to_wavelength(
         pge_runconfig.input_file_group.frequency, cfg.cslc_file_list[0]
     )
+
     # IONOSPHERE
     if not pge_runconfig.dynamic_ancillary_file_group.gunw_files:
         from disp_nisar.ionosphere import (
             get_center_frequencies,
             run_ionosphere_estimation,
         )
+
+        ref_point = read_reference_point(out_paths.timeseries_paths[0].parent)
 
         # if GUNW are not specified, run splitspectrum based on freq.A/B
         # load algorithm_ionosphere_parameters.yaml for freq.B
@@ -278,6 +281,7 @@ def run(
         cfg_freqB.output_options.bounds = cfg.output_options.bounds
         cfg_freqB.output_options.bounds_epsg = cfg.output_options.bounds_epsg
         cfg_freqB.output_options.epsg = cfg.output_options.epsg
+        cfg_freqB.timeseries_options.reference_point = (ref_point.row, ref_point.col)
 
         # Note: implement and test carying compressed slcs
         # with forward/historical mode, for workflow with freqB
@@ -841,10 +845,11 @@ def process_product(
     setup_logging(logger_name="disp_nisar", debug=True, filename=pge_runconfig.log_file)
 
     corrections = {}
-
     if files.ionosphere is not None:
         warped_iono = stitching.warp_to_match(
-            files.ionosphere, files.unwrapped, resample_alg="bilinear"
+            files.ionosphere,
+            files.unwrapped,
+            resample_alg="bilinear",
         )
         iono_radians = io.load_gdal(warped_iono)
         iono_radians *= wavelength / (4.0 * np.pi)
