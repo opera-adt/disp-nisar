@@ -242,7 +242,16 @@ def create_output_product(
     if iono_arr is not None:
         iono_arr = np.asarray(iono_arr, dtype=np.float32)
         if reference_point is not None:
-            iono_arr -= iono_arr[reference_point.row, reference_point.col]
+            ref_val = iono_arr[reference_point.row, reference_point.col]
+            if np.isnan(ref_val):
+                # If reference pixel is NaN, use nanmean of 3x3 area
+                row, col = reference_point.row, reference_point.col
+                row_start = max(0, row - 1)
+                row_end = min(iono_arr.shape[0], row + 2)
+                col_start = max(0, col - 1)
+                col_end = min(iono_arr.shape[1], col + 2)
+                ref_val = np.nanmean(iono_arr[row_start:row_end, col_start:col_end])
+            iono_arr -= ref_val
         disp_arr -= iono_arr
         del iono_arr
         gc.collect()
