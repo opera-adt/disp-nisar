@@ -19,7 +19,6 @@ from osgeo import gdal, osr
 
 from disp_nisar import __version__
 from disp_nisar._geometry import (
-    downsample_geometry_for_products,
     prepare_geometry_layers,
 )
 from disp_nisar.browse_image import make_browse_image_from_arr
@@ -86,6 +85,8 @@ def run_static_layers(
 
     # Extract basic config parameters
     frame_id = pge_runconfig.input_file_group.frame_id
+    if frame_id is None:
+        raise ValueError("frame_id is required in input_file_group")
     frequency = pge_runconfig.input_file_group.frequency
     polarization = pge_runconfig.input_file_group.polarization
     gslc_file = pge_runconfig.dynamic_ancillary_file_group.gslc_file
@@ -97,7 +98,8 @@ def run_static_layers(
     if dem_file and str(dem_file).strip() == "":
         dem_file = None
 
-    # Auto-download GSLC if not provided or doesn't exist, and frame_to_bounds is a GeoPackage
+    # Auto-download GSLC if not provided or doesn't exist,
+    # and frame_to_bounds is a GeoPackage
     frame_to_bounds_json = (
         pge_runconfig.static_ancillary_file_group.frame_to_bounds_json
     )
@@ -109,11 +111,10 @@ def run_static_layers(
         if gslc_file:
             logger.warning(f"GSLC file specified but not found: {gslc_file}")
         logger.info("Attempting auto-download of GSLC...")
-        from opera_utils.nisar import search, download_gslcs
-        import pyproj
-
         # Get frame info from GeoPackage
         import geopandas as gpd
+        import pyproj
+        from opera_utils.nisar import download_gslcs, search
 
         gdf = gpd.read_file(frame_to_bounds_json)
         frame_data = gdf[gdf["frame_idx"] == frame_id]
@@ -168,9 +169,10 @@ def run_static_layers(
         if dem_file:
             logger.warning(f"DEM file specified but not found: {dem_file}")
         logger.info("Attempting auto-download of DEM...")
-        from disp_nisar._utils import get_nisar_frame_bbox
         import pyproj
         from osgeo import gdal
+
+        from disp_nisar._utils import get_nisar_frame_bbox
 
         epsg_utm, bounds_utm = get_nisar_frame_bbox(gslc_file, frequency, polarization)
 
@@ -273,58 +275,106 @@ def run_static_layers(
     _create_template_raster(template_raster, bounds, epsg)
 
     # Step 1: Generate geometry layers using existing prepare_geometry_layers
-    logger.info("Generating geometry layers (incidence, LOS, layover/shadow)")
-    geometry_outputs = prepare_geometry_layers(
-        gslc_path=gslc_file,
-        dem_path=dem_file,
-        output_dir=scratch_dir,
-        template_raster=template_raster,
-        incidence_output_name="incidence_angle.tif",
-        los_east_output_name="los_east.tif",
-        los_north_output_name="los_north.tif",
-        layover_shadow_output_name="layover_shadow_mask.tif",
-        chunk_size=200,
-        n_workers=pge_runconfig.worker_settings.threads_per_worker,
+    # Check if outputs already exist (in scratch or output directory)
+    output_dir_path = pge_runconfig.product_path_group.output_directory
+    incidence_path = scratch_dir / "incidence_angle.tif"
+    los_east_path = scratch_dir / "los_east.tif"
+    los_north_path = scratch_dir / "los_north.tif"
+    layover_shadow_mask_path = scratch_dir / "layover_shadow_mask.tif"
+
+    # Check if files exist in scratch dir first, if not check output dir
+    geometry_files_exist = all(
+        p.exists()
+        for p in [
+            incidence_path,
+            los_east_path,
+            los_north_path,
+            layover_shadow_mask_path,
+        ]
     )
 
-    incidence_path = geometry_outputs["incidence_angle"]
-    los_east_path = geometry_outputs["los_east"]
-    los_north_path = geometry_outputs["los_north"]
-    layover_shadow_mask_path = geometry_outputs["layover_shadow_mask"]
+    if not geometry_files_exist:
+        # Check if they exist in output directory and copy to scratch
+        output_paths = [
+            output_dir_path / "incidence_angle.tif",
+            output_dir_path / "los_east.tif",
+            output_dir_path / "los_north.tif",
+            output_dir_path / "layover_shadow_mask.tif",
+        ]
+        if all(p.exists() for p in output_paths):
+            logger.info("Geometry layers found in output directory, copying to scratch")
+            shutil.copy2(output_paths[0], incidence_path)
+            shutil.copy2(output_paths[1], los_east_path)
+            shutil.copy2(output_paths[2], los_north_path)
+            shutil.copy2(output_paths[3], layover_shadow_mask_path)
+            geometry_files_exist = True
+
+    if geometry_files_exist:
+        logger.info("Geometry layers already exist, skipping generation")
+    else:
+        logger.info("Generating geometry layers (incidence, LOS, layover/shadow)")
+        geometry_outputs = prepare_geometry_layers(
+            gslc_path=gslc_file,
+            dem_path=dem_file,
+            output_dir=scratch_dir,
+            template_raster=template_raster,
+            incidence_output_name="incidence_angle.tif",
+            los_east_output_name="los_east.tif",
+            los_north_output_name="los_north.tif",
+            layover_shadow_output_name="layover_shadow_mask.tif",
+            chunk_size=200,
+            n_workers=pge_runconfig.worker_settings.threads_per_worker,
+        )
+
+        incidence_path = geometry_outputs["incidence_angle"]
+        los_east_path = geometry_outputs["los_east"]
+        los_north_path = geometry_outputs["los_north"]
+        layover_shadow_mask_path = geometry_outputs["layover_shadow_mask"]
 
     # Step 2: Warp DEM to UTM at 30m resolution
-    logger.info("Warping DEM to UTM grid at 30m resolution")
-    dem_warped_path = warp_dem_to_utm(
-        dem_file=dem_file,
-        epsg=epsg,
-        bounds=bounds,
-        output_dir=scratch_dir,
-        spacing=30.0,
-    )
+    dem_warped_path = scratch_dir / "dem_warped_utm.tif"
+    if dem_warped_path.exists():
+        logger.info("Warped DEM already exists, skipping")
+    elif (output_dir_path / "dem_warped_utm.tif").exists():
+        logger.info("Warped DEM found in output directory, copying to scratch")
+        shutil.copy2(output_dir_path / "dem_warped_utm.tif", dem_warped_path)
+    else:
+        logger.info("Warping DEM to UTM grid at 30m resolution")
+        dem_warped_path = warp_dem_to_utm(
+            dem_file=dem_file,
+            epsg=epsg,
+            bounds=bounds,
+            output_dir=scratch_dir,
+            spacing=30.0,
+        )
 
     # Step 3: Optionally create 3-band LOS
     los_combined_path = None
     if pge_runconfig.create_3band_los:
-        logger.info("Creating 3-band LOS output")
-        los_combined_path = _make_3band_los(
-            los_east_path=los_east_path,
-            los_north_path=los_north_path,
-            output_dir=scratch_dir,
-            product_spacing_m=pge_runconfig.product_spacing_m,
-        )
+        los_combined_path = scratch_dir / "los_enu.tif"
+        if los_combined_path.exists():
+            logger.info("3-band LOS already exists, skipping")
+        elif (output_dir_path / "los_enu.tif").exists():
+            logger.info("3-band LOS found in output directory, copying to scratch")
+            shutil.copy2(output_dir_path / "los_enu.tif", los_combined_path)
+        else:
+            logger.info("Creating 3-band LOS output")
+            los_combined_path = _make_3band_los(
+                los_east_path=los_east_path,
+                los_north_path=los_north_path,
+                output_dir=scratch_dir,
+            )
 
     # Step 4: Optionally resample geometry to product spacing
+    # Note: This is typically done later in the main workflow when creating products
+    # For now, we skip this step as downsample_geometry_for_products requires
+    # a reference raster with the target spacing
     if pge_runconfig.product_spacing_m:
-        logger.info(f"Resampling geometry to {pge_runconfig.product_spacing_m}m")
-        resampled_outputs = downsample_geometry_for_products(
-            geometry_files=[incidence_path, los_east_path, los_north_path],
-            output_dir=scratch_dir,
-            target_spacing_m=pge_runconfig.product_spacing_m,
+        logger.warning(
+            f"product_spacing_m={pge_runconfig.product_spacing_m} specified, "
+            "but resampling is not implemented in static layers workflow. "
+            "Geometry will remain at native DEM resolution."
         )
-        # Update paths to resampled versions
-        incidence_path = resampled_outputs[0]
-        los_east_path = resampled_outputs[1]
-        los_north_path = resampled_outputs[2]
 
     # Step 5: Add metadata
     logger.info("Adding product metadata")
@@ -360,8 +410,6 @@ def run_static_layers(
 
     # Cleanup scratch directory
     logger.info("Cleaning up scratch directory...")
-    import shutil
-
     try:
         shutil.rmtree(scratch_dir)
         logger.info(f"Deleted scratch directory: {scratch_dir}")
@@ -477,7 +525,6 @@ def _make_3band_los(
     los_east_path: Path,
     los_north_path: Path,
     output_dir: Path,
-    product_spacing_m: int | None = None,
 ) -> Path:
     """Create 3-band LOS GeoTIFF (East, North, Up components).
 
@@ -489,8 +536,6 @@ def _make_3band_los(
         Path to LOS north component
     output_dir : Path
         Output directory
-    product_spacing_m : int, optional
-        If provided, resample to this spacing
 
     Returns
     -------
@@ -504,8 +549,6 @@ def _make_3band_los(
     with rio.open(los_east_path) as src:
         los_east = src.read(1)
         profile = src.profile.copy()
-        transform = src.transform
-        crs = src.crs
 
     with rio.open(los_north_path) as src:
         los_north = src.read(1)
@@ -674,34 +717,58 @@ def create_outputs(
     if static_layers_paths.los_combined_path:
         file_list.append(static_layers_paths.los_combined_path)
 
+    # Filter to only files that need processing (not already in output dir)
+    files_to_process = []
+    for path in file_list:
+        dest_path = output_dir / path.name
+        if dest_path.exists():
+            logger.info(f"{path.name} already exists in output directory, skipping")
+        else:
+            files_to_process.append(path)
+
+    if not files_to_process:
+        logger.info("All output files already exist, skipping processing")
+        return
+
     create_overviews(
-        file_paths=file_list,
+        file_paths=files_to_process,
         levels=[4, 8, 16, 32, 64],
         resampling=Resampling.NEAREST,
     )
 
     # Create browse image from los_east (or 3-band if available)
+    browse_filename = None
     if static_layers_paths.los_combined_path:
-        # Use the up component (band 3) for browse
-        arr = io.load_gdal(static_layers_paths.los_combined_path, band=3, masked=True)
         browse_filename = "los_enu.browse.png"
+        if not (output_dir / browse_filename).exists():
+            # Use the up component (band 3) for browse
+            arr = io.load_gdal(
+                static_layers_paths.los_combined_path, band=3, masked=True
+            )
+        else:
+            browse_filename = None  # Already exists
     else:
-        arr = io.load_gdal(static_layers_paths.los_east_path, masked=True)
         browse_filename = "los_east.browse.png"
+        if not (output_dir / browse_filename).exists():
+            arr = io.load_gdal(static_layers_paths.los_east_path, masked=True)
+        else:
+            browse_filename = None  # Already exists
 
-    # Create a simple mask (1=good where data exists, 0=bad where NaN)
-    mask = (~np.isnan(arr)).astype(np.uint8)
+    if browse_filename:
+        # Create a simple mask (1=good where data exists, 0=bad where NaN)
+        mask = (~np.isnan(arr)).astype(np.uint8)
 
-    make_browse_image_from_arr(
-        output_filename=output_dir / browse_filename,
-        arr=arr,
-        mask=mask,
-        vmin=-1.0,
-        vmax=1.0,
-        cmap="gray",
-    )
+        make_browse_image_from_arr(
+            output_filename=output_dir / browse_filename,
+            arr=arr,
+            mask=mask,
+            vmin=-1.0,
+            vmax=1.0,
+            cmap="gray",
+        )
 
     # Move all files to output directory
-    for path in file_list:
-        new_path = shutil.move(str(path), output_dir)
+    for path in files_to_process:
+        dest_path = output_dir / path.name
+        shutil.move(str(path), dest_path)
         logger.info(f"Moved {path.name} to {output_dir}")

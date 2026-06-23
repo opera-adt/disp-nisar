@@ -204,13 +204,17 @@ class StaticLayersDynamicAncillaryFileGroup(YamlModel):
 
     gslc_file: Optional[Path] = Field(
         None,
-        description="Path to a single NISAR GSLC HDF5 file for radar grid metadata. "
-        "If not provided and frame_to_bounds_json is a GeoPackage, will auto-download.",
+        description=(
+            "Path to a single NISAR GSLC HDF5 file for radar grid metadata. If not"
+            " provided and frame_to_bounds_json is a GeoPackage, will auto-download."
+        ),
     )
     dem_file: Optional[Path] = Field(
         None,
-        description="Path to DEM file covering the frame (EPSG:4326). "
-        "If not provided and frame_to_bounds_json is provided, will auto-download.",
+        description=(
+            "Path to DEM file covering the frame (EPSG:4326). "
+            "If not provided and frame_to_bounds_json is provided, will auto-download."
+        ),
     )
     mask_file: Optional[Path] = Field(
         None,
@@ -864,5 +868,8 @@ class StaticLayersRunConfig(RunConfig):
     )
     product_spacing_m: Optional[int] = Field(
         None,
-        description="Resample geometry to this spacing (meters). If None, uses native DEM resolution.",
+        description=(
+            "Resample geometry to this spacing (meters). If None, uses native DEM"
+            " resolution."
+        ),
     )

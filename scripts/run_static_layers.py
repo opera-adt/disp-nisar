@@ -65,7 +65,6 @@ def download_gslc_for_frame(
     frame_id: int,
     frame_info: dict,
     output_dir: Path,
-    frequency: str = "frequencyA",
 ) -> Path:
     """Download a GSLC file for the given frame using opera_utils.nisar.
 
@@ -77,8 +76,6 @@ def download_gslc_for_frame(
         Frame information from get_frame_info()
     output_dir : Path
         Directory to save downloaded GSLC
-    frequency : str
-        Frequency band to search for
 
     Returns
     -------
@@ -86,8 +83,7 @@ def download_gslc_for_frame(
         Path to downloaded GSLC file
 
     """
-    from opera_utils.nisar import search, download_gslcs
-    from datetime import datetime, timedelta
+    from opera_utils.nisar import download_gslcs, search
 
     logger.info(
         f"Searching for GSLC data for frame {frame_id}, track {frame_info['track']}"
@@ -159,12 +155,12 @@ def download_gslc_for_frame(
     if len(results) == 0:
         raise ValueError(
             f"No GSLC data found for frame {frame_id}.\n"
-            f"Search criteria tried:\n"
+            "Search criteria tried:\n"
             f"  Track: {frame_info['track']}\n"
             f"  Frame number: {frame_info['frame']}\n"
             f"  Orbit: {orbit_dir}\n"
             f"  Bounds: {wgs84_bbox}\n"
-            f"\nPlease provide a GSLC file using --gslc-file option."
+            "\nPlease provide a GSLC file using --gslc-file option."
         )
 
     logger.info(f"Found {len(results)} GSLC products")
@@ -178,7 +174,7 @@ def download_gslc_for_frame(
 
     # Download the most recent one
     most_recent = results[0]
-    logger.info(f"Downloading most recent GSLC:")
+    logger.info("Downloading most recent GSLC:")
     logger.info(f"  Filename: {most_recent.filename}")
     logger.info(f"  Date: {most_recent.start_datetime}")
 
@@ -211,7 +207,6 @@ def download_gslc_for_frame(
 
 
 def download_dem(
-    frame_id: int,
     gslc_file: Path,
     frequency: str,
     polarization: str,
@@ -221,8 +216,6 @@ def download_dem(
 
     Parameters
     ----------
-    frame_id : int
-        NISAR frame ID
     gslc_file : Path
         Path to GSLC file to extract bounds from
     frequency : str
@@ -333,6 +326,8 @@ def create_runconfig(
         Output directory
     scratch_dir : Path
         Scratch directory
+    frame_gpkg : Path
+        Path to frame GeoPackage file
     frequency : str
         Frequency band
     polarization : str
@@ -496,7 +491,6 @@ def main(
             frame_id=frame_id,
             frame_info=frame_info,
             output_dir=scratch_dir / "gslc",
-            frequency=frequency,
         )
     else:
         # Ensure gslc_file is absolute
@@ -507,7 +501,6 @@ def main(
     if dem_file is None:
         logger.info("No DEM file provided, downloading...")
         dem_file = download_dem(
-            frame_id=frame_id,
             gslc_file=gslc_file,
             frequency=frequency,
             polarization=polarization,
