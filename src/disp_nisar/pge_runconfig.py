@@ -199,10 +199,32 @@ class StaticAncillaryFileGroup(YamlModel):
     )
 
 
+class StaticLayersDynamicAncillaryFileGroup(YamlModel):
+    """Dynamic ancillary files for static layers workflow."""
+
+    gslc_file: Optional[Path] = Field(
+        None,
+        description="Path to a single NISAR GSLC HDF5 file for radar grid metadata. "
+        "If not provided and frame_to_bounds_json is a GeoPackage, will auto-download.",
+    )
+    dem_file: Optional[Path] = Field(
+        None,
+        description="Path to DEM file covering the frame (EPSG:4326). "
+        "If not provided and frame_to_bounds_json is provided, will auto-download.",
+    )
+    mask_file: Optional[Path] = Field(
+        None,
+        description="Optional water/land mask file (0=masked, 1=good, uint8).",
+    )
+    model_config = ConfigDict(extra="forbid")
+
+
 class PrimaryExecutable(YamlModel):
     """Group describing the primary executable."""
 
-    product_type: Literal["DISP_NISAR_FORWARD", "DISP_NISAR_HISTORICAL"] = Field(
+    product_type: Literal[
+        "DISP_NISAR_FORWARD", "DISP_NISAR_HISTORICAL", "DISP_NISAR_STATIC"
+    ] = Field(
         default="DISP_NISAR_FORWARD",
         description="Product type of the PGE.",
     )
@@ -829,3 +851,18 @@ def _create_forward_mode_network(nearest_n: int = 3) -> InterferogramNetwork:
     if nearest_n == 4:
         indexes.extend([(-5, -1), (-5, -2), (-5, -3), (-5, -2)])
     return InterferogramNetwork(indexes=indexes)
+
+
+class StaticLayersRunConfig(RunConfig):
+    """Run configuration for NISAR static layers workflow."""
+
+    model_config = ConfigDict(extra="allow")
+    dynamic_ancillary_file_group: StaticLayersDynamicAncillaryFileGroup
+    create_3band_los: bool = Field(
+        False,
+        description="Create optional 3-band LOS output (East/North/Up)",
+    )
+    product_spacing_m: Optional[int] = Field(
+        None,
+        description="Resample geometry to this spacing (meters). If None, uses native DEM resolution.",
+    )
