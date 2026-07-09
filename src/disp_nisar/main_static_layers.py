@@ -792,7 +792,7 @@ def create_outputs(
             output_filename=output_dir / browse_filename,
             arr=arr,
             mask=mask,
-            vmin=-1.0,
+            vmin=0.5,
             vmax=1.0,
             cmap="gray",
         )

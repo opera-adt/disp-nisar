@@ -1050,7 +1050,7 @@ def _create_identification_group(
             name="source_data_file_list",
             dimensions=(),
             data=",".join(
-                p.stem for p in pge_runconfig.input_file_group.gslc_file_list
+                Path(p).stem for p in pge_runconfig.input_file_group.gslc_file_list
             ),
             fillvalue=None,
             description=(
