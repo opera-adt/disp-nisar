@@ -383,6 +383,8 @@ class TestAddProductMetadata:
             orbit_direction="ascending",
             frequency="frequencyA",
             processing_datetime=processing_datetime,
+            track_number=42,
+            acquisition_mode="4005",
         )
 
         # Check that metadata was added
@@ -394,6 +396,8 @@ class TestAddProductMetadata:
         assert metadata["platform"] == "NISAR"
         assert metadata["frame_id"] == "12345"
         assert metadata["orbit_direction"] == "ascending"
+        assert metadata["track_number"] == "42"
+        assert metadata["acquisition_mode"] == "4005"
         ds = None
 
 

@@ -15,6 +15,7 @@ from dolphin import Bbox, PathOrStr, io
 from dolphin._log import log_runtime, setup_logging
 from dolphin._overviews import Resampling, create_overviews
 from dolphin.utils import get_max_memory_usage
+from opera_utils import CslcParseError, parse_filename
 from osgeo import gdal, osr
 
 from disp_nisar import __version__
@@ -39,6 +40,7 @@ DEM_METADATA = {
     "input_dem_source": "Copernicus GLO-30 DEM",
 }
 
+# NOTE compare layover shadow mask with NISAR offical one when is available
 MASK_DESCRIPTION = (
     "Layover/Shadow Mask. Values: 0: masked (layover/shadow); 1: good data"
 )
@@ -220,6 +222,14 @@ def run_static_layers(
         orbit_direction = hf["/science/LSAR/identification/orbitPassDirection"][()]
         if isinstance(orbit_direction, bytes):
             orbit_direction = orbit_direction.decode("utf-8")
+        track_number = int(hf["/science/LSAR/identification/trackNumber"][()])
+
+    # Acquisition mode is the 4-digit bandwidth code in the official NISAR SDS
+    # filename (e.g. "4005"); older/simulated filenames don't carry it.
+    try:
+        acquisition_mode = parse_filename(gslc_file)["bandwidth"]
+    except (CslcParseError, KeyError):
+        acquisition_mode = "unknown"
 
     # Get frame bounds and EPSG
     # Try to load from frame_to_bounds_json (can be JSON or GeoPackage)
@@ -394,6 +404,8 @@ def run_static_layers(
         orbit_direction=orbit_direction,
         frequency=frequency,
         processing_datetime=processing_start_datetime,
+        track_number=track_number,
+        acquisition_mode=acquisition_mode,
     )
 
     # Step 6: Create outputs (overviews, browse image, move to output directory)
@@ -512,6 +524,7 @@ def warp_dem_to_utm(
         width=width,
         height=height,
         resampleAlg="cubic",
+        dstNodata=np.nan,
         creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"],
     )
 
@@ -592,6 +605,8 @@ def add_product_metadata(
     orbit_direction: str,
     frequency: str,
     processing_datetime: datetime,
+    track_number: int,
+    acquisition_mode: str,
 ):
     """Add comprehensive metadata to all static layer products.
 
@@ -609,23 +624,38 @@ def add_product_metadata(
         Frequency band (frequencyA/frequencyB)
     processing_datetime : datetime
         Processing start time
+    track_number : int
+        Track/relative orbit number of the source GSLC
+    acquisition_mode : str
+        Radar acquisition (bandwidth) mode code parsed from the GSLC filename
 
     """
     metadata = {
         "platform": "NISAR",
         "instrument_name": "NISAR L-SAR",
         "project": "OPERA",
+        "institution": "NASA JPL",
+        "contact_information": "opera-sds-ops@jpl.nasa.gov",
         "radar_band": "L" if frequency == "frequencyA" else "S",
         "frequency": frequency,
         "product_type": "DISP_NISAR_STATIC",
         "product_version": pge_runconfig.product_path_group.product_version,
         "product_specification_version": PRODUCT_SPECIFICATION_VERSION,
         "processing_facility": "NASA JPL",
+        "ceos_analysis_ready_data_document_identifier": (
+            "https://ceos.org/ard/files/PFS/SAR/v1.2/"
+            "CEOS-ARD_PFS_Synthetic_Aperture_Radar_v1.2.pdf"
+        ),
         "frame_id": str(frame_id),
+        "track_number": str(track_number),
         "orbit_direction": orbit_direction,
+        "acquisition_mode": acquisition_mode,
+        "look_direction": "left",
         "processing_datetime": processing_datetime.strftime(DATE_TIME_METADATA_FORMAT),
         "disp_nisar_software_version": __version__,
         "imaging_geometry": "Geocoded",
+        "product_sample_spacing": "30",
+        "source_data_original_institution": "NASA TBC",
     }
 
     # Add DEM-specific metadata to dem_warped
@@ -762,7 +792,7 @@ def create_outputs(
             output_filename=output_dir / browse_filename,
             arr=arr,
             mask=mask,
-            vmin=-1.0,
+            vmin=0.5,
             vmax=1.0,
             cmap="gray",
         )

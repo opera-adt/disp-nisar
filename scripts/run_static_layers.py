@@ -3,23 +3,16 @@
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
-from dolphin import Bbox
-from dolphin._log import setup_logging
 
-from disp_nisar.main_static_layers import run_static_layers
-from disp_nisar.pge_runconfig import (
-    InputFileGroup,
-    PrimaryExecutable,
-    ProductPathGroup,
-    StaticAncillaryFileGroup,
-    StaticLayersDynamicAncillaryFileGroup,
-    StaticLayersRunConfig,
-    WorkerSettings,
-)
+if TYPE_CHECKING:
+    from disp_nisar.pge_runconfig import StaticLayersRunConfig
 
 logger = logging.getLogger("disp_nisar")
+
+NAME_TEMPLATE = "OPERA_L3_DISP-NI-STATIC_F{frame_id:05d}_20250101_v1.0"
 
 
 def get_frame_info(frame_id: int, gpkg_file: Path) -> dict:
@@ -39,6 +32,7 @@ def get_frame_info(frame_id: int, gpkg_file: Path) -> dict:
 
     """
     import geopandas as gpd
+    from dolphin import Bbox
 
     gdf = gpd.read_file(gpkg_file)
     frame_data = gdf[gdf["frame_idx"] == frame_id]
@@ -59,6 +53,44 @@ def get_frame_info(frame_id: int, gpkg_file: Path) -> dict:
         ),
         "pass_direction": row["passDirection"],
     }
+
+
+def validate_frame_id_matches_gslc(
+    gslc_file: Path,
+    frame_info: dict,
+    frame_id: int,
+) -> None:
+    """Confirm a user-supplied ``--frame-id`` matches the GSLC's own track/frame.
+
+    Parameters
+    ----------
+    gslc_file : Path
+        Path to the NISAR GSLC HDF5 file to check.
+    frame_info : dict
+        Frame information from get_frame_info() for the given frame_id.
+    frame_id : int
+        The frame ID being validated (for error messages only).
+
+    Raises
+    ------
+    ValueError
+        If the GSLC's track/frame number don't match frame_info.
+
+    """
+    import h5py
+
+    with h5py.File(gslc_file, "r") as hf:
+        gslc_track = int(hf["/science/LSAR/identification/trackNumber"][()])
+        gslc_frame = int(hf["/science/LSAR/identification/frameNumber"][()])
+
+    if gslc_track != frame_info["track"] or gslc_frame != frame_info["frame"]:
+        raise ValueError(
+            f"--frame-id {frame_id} corresponds to track {frame_info['track']}, "
+            f"frame {frame_info['frame']} in the frame database, but "
+            f"{gslc_file} is track {gslc_track}, frame {gslc_frame}. "
+            "Double-check --frame-id against this GSLC, or look up the correct "
+            "frame_idx for this track/frame in the frame GeoPackage."
+        )
 
 
 def download_gslc_for_frame(
@@ -240,6 +272,7 @@ def download_dem(
 
     # Convert UTM bounds to WGS84 for DEM download
     import pyproj
+    from dolphin import Bbox
 
     transformer = pyproj.Transformer.from_crs(
         f"EPSG:{epsg_utm}",
@@ -309,7 +342,7 @@ def create_runconfig(
     polarization: str = "HH",
     mask_file: Path | None = None,
     product_version: str = "0.4",
-    create_3band_los: bool = False,
+    create_3band_los: bool = True,
     product_spacing_m: int | None = None,
 ) -> Path:
     """Create a runconfig for static layers processing.
@@ -347,6 +380,16 @@ def create_runconfig(
         Path to created runconfig file
 
     """
+    from disp_nisar.pge_runconfig import (
+        InputFileGroup,
+        PrimaryExecutable,
+        ProductPathGroup,
+        StaticAncillaryFileGroup,
+        StaticLayersDynamicAncillaryFileGroup,
+        StaticLayersRunConfig,
+        WorkerSettings,
+    )
+
     # Ensure all paths are absolute to avoid relative path issues
     runconfig = StaticLayersRunConfig(
         input_file_group=InputFileGroup(
@@ -380,6 +423,24 @@ def create_runconfig(
     logger.info(f"Created runconfig at {runconfig_path}")
 
     return runconfig_path
+
+
+def _rename_outputs(runconfig: "StaticLayersRunConfig") -> None:
+    """Rename generated static layer files to the OPERA product naming convention."""
+    frame_id = runconfig.input_file_group.frame_id
+    template = NAME_TEMPLATE.format(frame_id=frame_id)
+
+    los_files = list(runconfig.product_path_group.output_directory.glob("los_enu.tif"))
+    if los_files:
+        los_files[0].rename(los_files[0].parent / f"{template}_los_enu.tif")
+
+    dem_file = next(iter(runconfig.product_path_group.output_directory.glob("dem*tif")))
+    dem_file.rename(dem_file.parent / f"{template}_dem.tif")
+
+    mask_file = next(
+        iter(runconfig.product_path_group.output_directory.glob("layover*tif"))
+    )
+    mask_file.rename(mask_file.parent / f"{template}_layover_shadow_mask.tif")
 
 
 @click.command()
@@ -427,14 +488,14 @@ def create_runconfig(
     help="Optional water/land mask file",
 )
 @click.option(
-    "--create-3band-los",
-    is_flag=True,
+    "--create-3band-los/--no-create-3band-los",
+    default=True,
     help="Create 3-band LOS output (East/North/Up)",
 )
 @click.option(
     "--product-spacing-m",
     type=int,
-    default=None,
+    default=30,
     help="Resample geometry to this spacing in meters (e.g., 90)",
 )
 @click.option("--debug", is_flag=True, help="Enable debug logging")
@@ -461,6 +522,8 @@ def main(
     5. Generate static layers
     6. Report outputs
     """
+    from dolphin._log import setup_logging
+
     setup_logging(logger_name="disp_nisar", debug=debug)
 
     # Default output directory (use absolute paths to avoid issues)
@@ -496,6 +559,7 @@ def main(
         # Ensure gslc_file is absolute
         gslc_file = gslc_file.resolve()
         logger.info(f"Using provided GSLC: {gslc_file}")
+        validate_frame_id_matches_gslc(gslc_file, frame_info, frame_id)
 
     # Step 2: Download DEM if not provided
     if dem_file is None:
@@ -527,6 +591,9 @@ def main(
 
     # Step 4: Run static layers workflow
     logger.info("Running static layers workflow...")
+    from disp_nisar.main_static_layers import run_static_layers
+    from disp_nisar.pge_runconfig import StaticLayersRunConfig
+
     rc = StaticLayersRunConfig.from_yaml(runconfig_path)
     outputs = run_static_layers(rc)
 
@@ -544,15 +611,8 @@ def main(
         logger.info(f"  - LOS combined (3-band): {outputs.los_combined_path.name}")
     logger.info("=" * 60)
 
-    # Step 6: Cleanup scratch directory
-    logger.info("\nCleaning up scratch directory...")
-    import shutil
-
-    try:
-        shutil.rmtree(scratch_dir)
-        logger.info(f"Deleted scratch directory: {scratch_dir}")
-    except Exception as e:
-        logger.warning(f"Failed to delete scratch directory: {e}")
+    # Step 6: Rename outputs to the OPERA product naming convention
+    _rename_outputs(rc)
 
 
 if __name__ == "__main__":

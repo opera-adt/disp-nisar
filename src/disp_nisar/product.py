@@ -19,6 +19,7 @@ import pyproj
 from dolphin import __version__ as dolphin_version
 from dolphin import filtering, io
 from dolphin._types import Filename
+from dolphin.constants import SPEED_OF_LIGHT
 from dolphin.io import round_mantissa
 from dolphin.utils import DummyProcessPoolExecutor, format_dates
 from dolphin.workflows import DisplacementWorkflow, YamlModel
@@ -732,7 +733,7 @@ def _create_identification_group(
         )
 
         frame_id = pge_runconfig.input_file_group.frame_id
-        url = f"https://search.asf.alaska.edu/#/?dataset=OPERA-S1&productTypes=DISP-S1-STATIC&frame={frame_id}"
+        url = f"https://search.asf.alaska.edu/#/?dataset=OPERA-NI&productTypes=DISP-NI-STATIC&frame={frame_id}"
         _create_dataset(
             group=identification_group,
             name="static_layers_data_access",
@@ -744,11 +745,18 @@ def _create_identification_group(
                 " product. This includes the radar unit look vector for each pixel."
             ),
         )
+        # IEEE radar band thresholds by wavelength (meters)
+        if radar_wavelength > 0.15:
+            radar_band = "L"
+        elif radar_wavelength > 0.075:
+            radar_band = "S"
+        else:
+            radar_band = "C"
         _create_dataset(
             group=identification_group,
             name="radar_band",
             dimensions=(),
-            data="C",
+            data=radar_band,
             fillvalue=None,
             description="Acquired radar frequency band",
         )
@@ -984,7 +992,7 @@ def _create_identification_group(
             group=identification_group,
             name="acquisition_mode",
             dimensions=(),
-            data="IW",
+            data="SweepSAR",
             fillvalue=None,
             description="Radar acquisition mode for input products",
         )
@@ -992,7 +1000,7 @@ def _create_identification_group(
             group=identification_group,
             name="radar_center_frequency",
             dimensions=(),
-            data=5405000454.33435,
+            data=SPEED_OF_LIGHT / radar_wavelength,
             fillvalue=None,
             description="Radar center frequency of input products",
             attrs={"units": "Hertz"},
@@ -1001,7 +1009,7 @@ def _create_identification_group(
             group=identification_group,
             name="source_data_acquisition_polarization",
             dimensions=(),
-            data="VV/VH",
+            data="HH/HV",
             fillvalue=None,
             description="Polarization type of source radar acquisition ",
         )
@@ -1042,7 +1050,7 @@ def _create_identification_group(
             name="source_data_file_list",
             dimensions=(),
             data=",".join(
-                p.stem for p in pge_runconfig.input_file_group.gslc_file_list
+                Path(p).stem for p in pge_runconfig.input_file_group.gslc_file_list
             ),
             fillvalue=None,
             description=(
@@ -1180,7 +1188,7 @@ def _create_identification_group(
             name="product_data_access",
             dimensions=(),
             data=(
-                "https://search.asf.alaska.edu/#/?dataset=OPERA-S1&productTypes=DISP-S1"
+                "https://search.asf.alaska.edu/#/?dataset=OPERA-NI&productTypes=DISP-NI"
             ),
             fillvalue=None,
             description=(
