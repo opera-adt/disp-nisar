@@ -15,6 +15,7 @@ dependencies:
   - matplotlib-base
   - pydantic>=2.1
   - ruamel.yaml>=0.15
+  - rioxarray
   - yamale
   # Corrections
   - pysolid  # For solid earth tide corrections

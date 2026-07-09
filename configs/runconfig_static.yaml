@@ -1,0 +1,41 @@
+# Static Layers Runconfig for DISP-NISAR
+#
+# This configuration file is used to generate standalone static geometry layers
+# including LOS vectors, incidence angles, layover/shadow masks, and warped DEM
+# that can be reused across multiple displacement processing runs.
+
+input_file_group:
+  frame_id: 26410  # REQUIRED: NISAR frame ID
+  frequency: frequencyA  # frequencyA (L-band) or frequencyB (S-band)
+  polarization: HH  # HH, HV, VH, or VV
+
+dynamic_ancillary_file_group:
+  gslc_file:  # Optional: Path to NISAR GSLC HDF5 file. Auto-downloads if not provided and frame_to_bounds_json is a GeoPackage
+  dem_file:  # Optional: Path to DEM file (EPSG:4326). Auto-downloads if not provided
+  mask_file:  # Optional: Water/land mask (0=masked, 1=good, uint8)
+
+static_ancillary_file_group:
+  frame_to_bounds_json: opera-nisar-disp-frames.gpkg  # Path to GeoPackage or JSON file
+  algorithm_parameters_overrides_json:  # Optional: frame-specific parameter overrides
+  reference_date_database_json:  # Optional: reference date information
+
+primary_executable:
+  product_type: DISP_NISAR_STATIC
+
+product_path_group:
+  product_path: output  # Final output directory
+  scratch_path: scratch  # Temporary/scratch directory
+  sas_output_path: output  # Alias for product_path
+  product_version: '0.4'
+
+worker_settings:
+  threads_per_worker: 2  # Number of threads for parallel processing
+  n_parallel_bursts: 8  # Not used for static layers
+  block_shape: [512, 512]  # Not used for static layers
+
+log_file: scratch/log_sas.log
+
+# Static layers specific options
+create_3band_los: true  # Set to true to create 3-band LOS output (East/North/Up)
+product_spacing_m:  # Optional: resample geometry to this spacing in meters (e.g., 90 for 90m)
+                     # If not set, uses native DEM resolution

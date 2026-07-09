@@ -40,4 +40,11 @@ repos:
     rev: "26.5.1"
     hooks:
       - id: black
-        args: [--preview, --enable-unstable-feature, string_processing]
+        args:
+          [
+            --preview,
+            --enable-unstable-feature,
+            string_processing,
+            --target-version,
+            py311,
+          ]
