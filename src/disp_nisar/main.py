@@ -66,6 +66,28 @@ def run(
     # Save the start for a metadata field
     processing_start_datetime = datetime.now(timezone.utc)
 
+    ionosphere_options = pge_runconfig.get_ionosphere_options()
+    use_main_diff = (
+        not pge_runconfig.dynamic_ancillary_file_group.gunw_files
+        and ionosphere_options.method == "main_diff"
+    )
+    if use_main_diff:
+        if pge_runconfig.input_file_group.frequency != "frequencyA":
+            raise ValueError("main_diff requires a nominal frequencyA workflow")
+        if (
+            pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD"
+            or any("compressed" in f.name.lower() for f in cfg.cslc_file_list)
+        ):
+            raise ValueError(
+                "main_diff supports uncompressed historical GSLC stacks only;"
+                " forward/compressed A/B state is not yet supported"
+            )
+        if (
+            pge_runconfig.dynamic_ancillary_file_group.ionosphere_algorithm_parameters_file
+            is None
+        ):
+            raise ValueError("main_diff requires an explicit frequencyB algorithm file")
+
     # Add a check to fail if passed duplicate dates area passed
     _assert_no_duplicate_dates(cfg.cslc_file_list)
     _assert_compressed_slcs_consecutive(cfg.cslc_file_list)
@@ -250,6 +272,9 @@ def run(
         out_paths.timeseries_paths = final_ts_paths
         out_paths.timeseries_residual_paths = final_residual_paths
 
+    # Preserve the full network before product-date filtering.
+    full_out_paths = out_paths
+
     # Filter by last processed date
     if last_processed := pge_runconfig.input_file_group.last_processed:
         logger.info(f"Filtering outputs before {last_processed}")
@@ -263,7 +288,16 @@ def run(
     )
 
     # IONOSPHERE
-    if not pge_runconfig.dynamic_ancillary_file_group.gunw_files:
+    if use_main_diff:
+        out_paths.ionospheric_corrections = _run_main_diff_workflow(
+            cfg,
+            pge_runconfig,
+            full_out_paths,
+            out_paths.timeseries_paths,
+            ionosphere_options,
+            debug,
+        )
+    elif not pge_runconfig.dynamic_ancillary_file_group.gunw_files:
         from disp_nisar.ionosphere import (
             get_center_frequencies,
             run_ionosphere_estimation,
@@ -366,6 +400,72 @@ def run(
     logger.info(f"Maximum memory usage: {max_mem:.2f} GB")
     logger.info(f"Config file dolphin version: {cfg._dolphin_version}")
     logger.info(f"Current running disp_nisar version: {__version__}")
+
+
+def _run_main_diff_workflow(
+    cfg, pge_runconfig, full_outputs, product_paths, options, debug
+):
+    """Run B through stitched IFGs, then estimate optional A/(A-B) corrections."""
+    from disp_nisar.ionosphere.gslc import get_center_frequencies
+    from disp_nisar.ionosphere.main_diff import BandInputs, run_main_diff_estimation
+
+    if not product_paths:
+        return []
+    cfg_b = pge_runconfig.to_workflow(
+        frequency="frequencyB", scratch_suffix="_freqB_main_diff"
+    )
+    cfg_b.output_options.bounds = cfg.output_options.bounds
+    cfg_b.output_options.bounds_epsg = cfg.output_options.bounds_epsg
+    cfg_b.output_options.epsg = cfg.output_options.epsg
+    method = getattr(
+        cfg_b.unwrap_options.unwrap_method, "value", cfg_b.unwrap_options.unwrap_method
+    )
+    if method != "snaphu":
+        raise ValueError("main_diff requires SNAPHU in the frequencyB algorithm file")
+    # Reuse the prepared binary mask, not the raw water-distance ancillary.
+    cfg_b.mask_file = cfg.mask_file
+    cfg_b.unwrap_options.run_unwrap = False
+    cfg_b.timeseries_options.run_inversion = False
+    cfg_b.timeseries_options.run_velocity = False
+    out_b = run_displacement(cfg=cfg_b, debug=debug, raise_on_empty=False)
+    gslc_by_date = {}
+    frequencies = None
+    for path in cfg.cslc_file_list:
+        date = get_dates(path)[0].replace(hour=0, minute=0, second=0, microsecond=0)
+        if date in gslc_by_date:
+            raise ValueError(f"Duplicate GSLC acquisition: {date}")
+        gslc_by_date[date] = path
+        current = get_center_frequencies(path)
+        if frequencies is not None and not np.allclose(
+            current, frequencies, rtol=0, atol=1
+        ):
+            raise ValueError("Center frequencies change within the GSLC stack")
+        frequencies = current
+    if frequencies is None:
+        raise ValueError("No GSLC inputs for main_diff")
+    ref = read_reference_point(product_paths[0].parent)
+    result = run_main_diff_estimation(
+        band_a=BandInputs(
+            full_outputs.stitched_ifg_paths,
+            full_outputs.stitched_cor_paths,
+            full_outputs.stitched_similarity_file,
+        ),
+        band_b=BandInputs(
+            out_b.stitched_ifg_paths,
+            out_b.stitched_cor_paths,
+            out_b.stitched_similarity_file,
+        ),
+        gslc_by_date=gslc_by_date,
+        output_timeseries_paths=product_paths,
+        reference_a=(ref.row, ref.col),
+        f_a=frequencies[0],
+        f_b=frequencies[1],
+        out_dir=cfg.work_directory / "ionosphere_main_diff",
+        unwrap_options=cfg_b.unwrap_options,
+        options=options,
+    )
+    _prune_block_dirs(cfg_b.work_directory)
+    return result
 
 
 def _prune_block_dirs(work_directory: Path, keep_files: Iterable[Path] = ()) -> int:
@@ -852,7 +952,15 @@ def process_product(
             resample_alg="bilinear",
         )
         iono_radians = io.load_gdal(warped_iono)
-        iono_radians *= wavelength / (4.0 * np.pi)
+        # The new path exports meters explicitly; preserve legacy conversion.
+        import rasterio
+
+        with rasterio.open(files.ionosphere) as iono_ds:
+            is_main_diff = iono_ds.tags().get("ionosphere_method") == "main_diff"
+            if is_main_diff and iono_ds.units[0] != "meters":
+                raise ValueError("main_diff correction must declare meters")
+        if not is_main_diff:
+            iono_radians *= wavelength / (4.0 * np.pi)
         corrections["ionosphere"] = iono_radians
     else:
         logger.warning(

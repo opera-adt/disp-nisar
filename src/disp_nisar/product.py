@@ -1481,7 +1481,12 @@ def _create_metadata_group(
             group=metadata_group,
             name="ceos_ionospheric_phase_correction",
             dimensions=(),
-            data="None",
+            data=(
+                "GSLC main-differential (A, A-B), frequencyB grid"
+                if not pge_runconfig.dynamic_ancillary_file_group.gunw_files
+                and pge_runconfig.get_ionosphere_options().method == "main_diff"
+                else "None"
+            ),
             fillvalue=None,
             description="Method used to correct for ionospheric phase noise",
         )
