@@ -209,9 +209,7 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
         unwrap_options.unwrap_method, "value", unwrap_options.unwrap_method
     )
     if method not in ("snaphu", "whirlwind"):
-        raise ValueError(
-            f"main_diff supports snaphu or whirlwind; received {method!r}"
-        )
+        raise ValueError(f"main_diff supports snaphu or whirlwind; received {method!r}")
     result = dict(prepared)
     for band in ("A", "D"):
         cfg = unwrap_options.model_copy(deep=True)
@@ -303,8 +301,8 @@ def select_common_reference(
                 best = candidate
     if best is None:
         raise ValueError(
-            "No common A/D reference survives donor and finite-phase checks; completed unwraps"
-            " are retained"
+            "No common A/D reference survives donor and finite-phase checks; completed"
+            " unwraps are retained"
         )
     return best[1], best[2]
 
@@ -483,8 +481,9 @@ def _run_locked(
     if not products:
         return []
     final_paths = [
-        out_dir / "corrections" /
-        ("_".join(d.strftime("%Y%m%d") for d in _date_pair(Path(p))) + "_iono.tif")
+        out_dir
+        / "corrections"
+        / ("_".join(d.strftime("%Y%m%d") for d in _date_pair(Path(p))) + "_iono.tif")
         for p in products
     ]
     if len(set(final_paths)) != len(final_paths):
@@ -528,32 +527,39 @@ def _run_locked(
     if not (0 <= origin[0] < target.height and 0 <= origin[1] < target.width):
         raise ValueError("Nominal A reference is outside the B grid")
     raw_paths = [
-        out_dir / "timeseries" /
-        ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B.rad.tif")
+        out_dir
+        / "timeseries"
+        / ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B.rad.tif")
         for pair in output_pairs
     ]
     inversion_ready = options.resume and all(p.is_file() for p in raw_paths)
     need_masks = not inversion_ready or any(
-        not final.is_file() and not (
-            out_dir / "timeseries" /
-            ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B_filled.rad.tif")
+        not final.is_file()
+        and not (
+            out_dir
+            / "timeseries"
+            / ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B_filled.rad.tif")
         ).is_file()
         for pair, final in zip(output_pairs, final_paths, strict=True)
     )
-    cached_masks = {
-        (d, b): prepare_gslc_mask_cache(
-            Path(gslc_by_date[d]),
-            b,
-            grids[b],
-            out_dir / "masks",
-            options.mask_reduction,
-            options.block_size,
-            options.mask_work_mb,
-            resume=options.resume,
-        )
-        for d in dates
-        for b in ("A", "B")
-    } if need_masks else {}
+    cached_masks = (
+        {
+            (d, b): prepare_gslc_mask_cache(
+                Path(gslc_by_date[d]),
+                b,
+                grids[b],
+                out_dir / "masks",
+                options.mask_reduction,
+                options.block_size,
+                options.mask_work_mb,
+                resume=options.resume,
+            )
+            for d in dates
+            for b in ("A", "B")
+        }
+        if need_masks
+        else {}
+    )
     jobs = []
     for i, pair in enumerate([] if inversion_ready else pairs, 1):
         name = "_".join(d.strftime("%Y%m%d") for d in pair)
@@ -624,7 +630,10 @@ def _run_locked(
         logger.info("Reusing existing ionosphere inversion results")
     else:
         reference = select_common_reference(
-            jobs, target, origin, timeseries_dir / "common_candidates.tif",
+            jobs,
+            target,
+            origin,
+            timeseries_dir / "common_candidates.tif",
             options.block_size,
         )
         atomic_json(
@@ -633,14 +642,23 @@ def _run_locked(
         )
         temporary = [p.with_name(f"{p.stem}.partial.tif") for p in intermediate]
         _invert_jobs(
-            jobs, pairs, target, reference, f_a, f_b, temporary,
-            output_pairs, options.block_size,
+            jobs,
+            pairs,
+            target,
+            reference,
+            f_a,
+            f_b,
+            temporary,
+            output_pairs,
+            options.block_size,
         )
         for source, destination in zip(temporary, intermediate, strict=True):
             source.replace(destination)
 
     outputs = []
-    for i, (src, match, name) in enumerate(zip(intermediate, products, names, strict=True)):
+    for i, (src, match, name) in enumerate(
+        zip(intermediate, products, names, strict=True)
+    ):
         output_path = correction_dir / f"{name}_iono.tif"
         outputs.append(output_path)
         if options.resume and output_path.is_file():
@@ -658,10 +676,15 @@ def _run_locked(
                 for band in ("A", "B"):
                     with rasterio.open(cached_masks[date, band]["inside"]) as mask_ds:
                         with WarpedVRT(
-                            mask_ds, crs=target.crs, transform=target.transform,
-                            width=target.width, height=target.height,
-                            resampling=Resampling.average, src_nodata=255,
-                            nodata=255, dtype="float32",
+                            mask_ds,
+                            crs=target.crs,
+                            transform=target.transform,
+                            width=target.width,
+                            height=target.height,
+                            resampling=Resampling.average,
+                            src_nodata=255,
+                            nodata=255,
+                            dtype="float32",
                         ) as mask_vrt:
                             inside = mask_vrt.read(1, masked=True).filled(0)
                     footprint &= inside > 0
@@ -675,22 +698,30 @@ def _run_locked(
 
             radius = fill_settings["mask_erosion_px"]
             eroded_donors = footprint & ~maximum_filter1d(
-                (~trusted).astype(np.uint8), size=2 * radius + 1, axis=1,
+                (~trusted).astype(np.uint8),
+                size=2 * radius + 1,
+                axis=1,
             ).astype(bool)
             if not eroded_donors.any():
                 raise ValueError(f"{name}: no donors remain after mask erosion")
 
             iono_filled, quality_mask = apply_similarity_mask_and_fill(
-                iono=iono, sim_mask=trusted, existing_mask=footprint,
+                iono=iono,
+                sim_mask=trusted,
+                existing_mask=footprint,
                 **fill_settings,
             )
             logger.info(
-                "%s: ionosphere valid before=%d, after=%d", name,
-                np.count_nonzero(trusted), np.count_nonzero(np.isfinite(iono_filled)),
+                "%s: ionosphere valid before=%d, after=%d",
+                name,
+                np.count_nonzero(trusted),
+                np.count_nonzero(np.isfinite(iono_filled)),
             )
             temporary_filled = filled_path.with_name(f"{filled_path.stem}.partial.tif")
             with rasterio.open(
-                temporary_filled, "w", **target.profile("float32", np.nan),
+                temporary_filled,
+                "w",
+                **target.profile("float32", np.nan),
             ) as dst:
                 dst.write(iono_filled.astype(np.float32), 1)
                 dst.set_band_unit(1, "radians")
@@ -702,7 +733,11 @@ def _run_locked(
 
         temporary_output = output_path.with_name(f"{output_path.stem}.partial.tif")
         _export_correction(
-            filled_path, Path(match), temporary_output, f_a, reference_a,
+            filled_path,
+            Path(match),
+            temporary_output,
+            f_a,
+            reference_a,
             options.block_size,
         )
         temporary_output.replace(output_path)

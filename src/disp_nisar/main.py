@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 import rasterio
 from rasterio.warp import transform
 
+
 @log_runtime
 def run(
     cfg: DisplacementWorkflow,
@@ -318,11 +319,7 @@ def run(
         cfg_freqB.output_options.bounds_epsg = cfg.output_options.bounds_epsg
         cfg_freqB.output_options.epsg = cfg.output_options.epsg
         cfg_freqB.timeseries_options.reference_point = (ref_point.row, ref_point.col)
-        b_vrt = (
-            cfg_freqB.work_directory
-            / "timeseries"
-            / "unw_network.vrt"
-        )
+        b_vrt = cfg_freqB.work_directory / "timeseries" / "unw_network.vrt"
 
         with rasterio.open(out_paths.timeseries_paths[0]) as src_a:
             x, y = src_a.xy(ref_point.row, ref_point.col)
@@ -345,7 +342,10 @@ def run(
 
         logger.info(
             "Reference pixel: A=(%d, %d), B=(%d, %d)",
-            ref_point.row, ref_point.col, row_b, col_b,
+            ref_point.row,
+            ref_point.col,
+            row_b,
+            col_b,
         )
         # Note: implement and test carying compressed slcs
         # with forward/historical mode, for workflow with freqB
@@ -676,9 +676,7 @@ def create_products(
             nlooks = row_looks * col_looks
 
             # Build the required mask immediately before conncomp regrowth.
-            combined_mask_file = (
-                cfg.work_directory / "combined_water_nodata_mask.tif"
-            )
+            combined_mask_file = cfg.work_directory / "combined_water_nodata_mask.tif"
 
             if (
                 pge_runconfig.dynamic_ancillary_file_group.mask_file
@@ -1183,10 +1181,7 @@ def _create_nodata_mask(
     """Write 1 for valid finite pixels and 0 for invalid pixels."""
     image = io.load_gdal(filename, masked=True)
 
-    valid = (
-        ~np.ma.getmaskarray(image)
-        & np.isfinite(np.ma.getdata(image))
-    )
+    valid = ~np.ma.getmaskarray(image) & np.isfinite(np.ma.getdata(image))
 
     io.write_arr(
         like_filename=filename,
