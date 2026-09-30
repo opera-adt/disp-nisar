@@ -608,11 +608,28 @@ def _run_locked(
         logger.info("[%d/%d] %s: %s", i, len(pairs), name, status)
         jobs.append(ready)
 
+    # Outside the pair loop: also runs when raw inversion outputs are reused.
+    transform = target.transform
+    dx = float(np.hypot(transform.a, transform.d))
+    dy = float(np.hypot(transform.b, transform.e))
+
+    if not target.crs.is_projected:
+        raise ValueError("Meter-based smoothing requires a projected CRS")
+
+    _, meters_per_unit = target.crs.linear_units_factor
+    dx_m = dx * meters_per_unit
+    dy_m = dy * meters_per_unit
+
     fill_settings = {
-        "fill_method": "gaussian",
-        "smooth_sigma": 50.0,
-        "mask_erosion_px": 3,
+        "fill_method": "gdal",
+        "max_search_dist": 500,  # Gap-fill search distance in pixels.
+        "smooth_sigma": (
+            options.smooth_sigma_m / dy_m,
+            options.smooth_sigma_m / dx_m,
+        ),
+        "mask_erosion_px": options.mask_erosion_px,
     }
+
     timeseries_dir = out_dir / "timeseries"
     correction_dir = out_dir / "corrections"
     timeseries_dir.mkdir(parents=True, exist_ok=True)

@@ -360,7 +360,7 @@ def apply_similarity_mask_and_fill(
 
     iono_filled = np.where(existing_mask, iono_filled, np.nan)
 
-    if smooth_sigma > 0 and fill_method != "gaussian":
+    if fill_method != "gaussian" and np.any(np.asarray(smooth_sigma) > 0):
         scene_mask = np.isfinite(iono_filled)
         iono_filled = smooth_iono(iono_filled, sigma=smooth_sigma, mask=scene_mask)
 

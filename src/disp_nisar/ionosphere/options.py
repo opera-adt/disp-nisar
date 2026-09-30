@@ -17,6 +17,8 @@ class IonosphereOptions(BaseModel):
     min_phasor_magnitude: float = Field(0.1, gt=0, le=1)
     block_size: int = Field(256, ge=16, le=2048)
     mask_work_mb: int = Field(128, ge=16)
+    smooth_sigma_m: float = 400.0
+    mask_erosion_px: int = 3
     nlooks: float = Field(
         5.0,
         gt=0,
