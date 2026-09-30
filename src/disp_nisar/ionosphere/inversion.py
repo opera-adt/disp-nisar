@@ -41,7 +41,7 @@ def build_design_matrix(
     num_ifgs = len(ifg_date_pairs)
     num_dates = len(unique_dates)
 
-    A = np.zeros((num_ifgs, num_dates - 1), dtype=np.float32)
+    A: np.ndarray = np.zeros((num_ifgs, num_dates - 1), dtype=np.float32)
     date_to_idx = {d: i for i, d in enumerate(unique_dates)}
 
     for i, (ref_date, sec_date) in enumerate(ifg_date_pairs):
@@ -90,7 +90,7 @@ def invert_ifg_to_timeseries(
     num_ifgs, rows, cols = ifg_stack.shape
     num_unknowns = design_matrix.shape[1]
 
-    ifg_flat = ifg_stack.astype(np.float32).reshape(num_ifgs, -1)
+    ifg_flat: np.ndarray = ifg_stack.astype(np.float32).reshape(num_ifgs, -1)
 
     # Track pixels with no valid data in any interferogram
     all_nan_mask = ~np.isfinite(ifg_flat).any(axis=0)
@@ -121,3 +121,56 @@ def invert_ifg_to_timeseries(
 
     timeseries_flat[:, all_nan_mask] = np.nan
     return timeseries_flat.reshape(num_unknowns, rows, cols)
+
+
+def invert_common_phase_block(
+    phase_a: np.ndarray,
+    phase_d: np.ndarray,
+    design_matrix: np.ndarray,
+    valid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Invert A and D using the same censored L2 operator and phase convention.
+
+    Parameters
+    ----------
+    phase_a, phase_d : np.ndarray
+        Spatially referenced phase blocks in radians, shape (pairs, rows, columns).
+    design_matrix : np.ndarray
+        Pair-to-acquisition incidence matrix with the first epoch column removed.
+    valid : np.ndarray
+        Common per-pair donor/component mask, with the same shape as phase_a.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        A and D time-series blocks. Rank-deficient pixel networks return NaN.
+
+    Notes
+    -----
+    Missing observations are removed, never treated as observations of zero.
+    Pixels with the same validity pattern share a direct matrix pseudoinverse.
+
+    """
+    if phase_a.shape != phase_d.shape or phase_a.shape != valid.shape:
+        raise ValueError("A, D and valid must have matching shapes")
+    if phase_a.ndim != 3 or design_matrix.shape[0] != phase_a.shape[0]:
+        raise ValueError("Expected (pairs, rows, columns) blocks and matching network")
+    n, rows, cols = phase_a.shape
+    a, d = phase_a.reshape(n, -1), phase_d.reshape(n, -1)
+    mask = valid.reshape(n, -1) & np.isfinite(a) & np.isfinite(d)
+    count = design_matrix.shape[1]
+    out_a = np.full((count, rows * cols), np.nan, np.float32)
+    out_d = out_a.copy()
+    patterns, groups = np.unique(
+        np.packbits(mask.T, axis=1), axis=0, return_inverse=True
+    )
+    for i, packed in enumerate(patterns):
+        use = np.unpackbits(packed, count=n).astype(bool)
+        sub = design_matrix[use].astype(np.float64)
+        if sub.shape[0] < count or np.linalg.matrix_rank(sub) < count:
+            continue
+        pixels = np.flatnonzero(groups == i)
+        operator = np.linalg.pinv(sub)
+        out_a[:, pixels] = operator @ a[np.ix_(use, pixels)]
+        out_d[:, pixels] = operator @ d[np.ix_(use, pixels)]
+    return out_a.reshape(count, rows, cols), out_d.reshape(count, rows, cols)

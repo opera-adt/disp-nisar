@@ -62,6 +62,7 @@ from pydantic import ConfigDict, Field, field_validator
 from ._common import NISAR_DATASET_NAME
 from ._utils import _frequency_to_wavelength, get_nisar_frame_bbox
 from .enums import ImagingFrequency, Polarization, ProcessingMode
+from .ionosphere.options import IonosphereOptions
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,8 @@ class ProductPathGroup(YamlModel):
 class AlgorithmParameters(YamlModel):
     """Class containing all the other `DisplacementWorkflow` classes."""
 
+    ionosphere_options: IonosphereOptions = Field(default_factory=IonosphereOptions)
+
     # Options for each step in the workflow
     ps_options: PsOptions = Field(default_factory=PsOptions)
     phase_linking: PhaseLinkingOptions = Field(default_factory=PhaseLinkingOptions)
@@ -422,6 +425,20 @@ class RunConfig(YamlModel):
             scratch_suffix=scratch_suffix,
         )
 
+    def get_ionosphere_options(self) -> IonosphereOptions:
+        """Read DISP estimator options from the main parameters and overrides."""
+        params = AlgorithmParameters.from_yaml(
+            self.dynamic_ancillary_file_group.algorithm_parameters_file
+        )
+        frame_id = self.input_file_group.frame_id
+        if frame_id is not None:
+            params = _override_parameters(
+                params,
+                self.static_ancillary_file_group.algorithm_parameters_overrides_json,
+                frame_id,
+            )
+        return params.ionosphere_options
+
     def to_ionosphere_workflow(self):
         """Convert to a `DisplacementWorkflow` for the ionosphere (freqB) workflow.
 
@@ -512,6 +529,8 @@ class RunConfig(YamlModel):
         # regenerate to ensure all defaults remained in updated version
         algo_params = AlgorithmParameters(**new_parameters.model_dump())
         param_dict = algo_params.model_dump()
+        # DISP-specific options must not be passed to Dolphin.
+        param_dict.pop("ionosphere_options", None)
 
         # Convert the frame_id into an output bounding box
         frame_to_bounds_file = self.static_ancillary_file_group.frame_to_bounds_json
