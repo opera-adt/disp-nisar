@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from tempfile import mkdtemp
 
 import h5py
 import numpy as np
@@ -12,13 +11,8 @@ from affine import Affine
 from rasterio.crs import CRS
 
 from ._main_diff_io import (
-    ALGORITHM_VERSION,
     Grid,
     check_reduction,
-    completed,
-    finish,
-    key,
-    stamp,
     windows,
 )
 
@@ -48,7 +42,8 @@ def _sums(a, r0, r1, c0, c1):
 def reduce_gslc_mask(dataset, source: Grid, target: Grid, mode: str, tile_size: int):
     """Yield window, valid donor, and footprint arrays without a native-sized read.
 
-    Codes: 1 valid, 0 invalid inside, 255 outside. Unknown codes are errors.
+    Raw GSLC codes: 1..254 valid subswath IDs, 0 invalid inside, 255 outside.
+    Reduced output masks are binary; raw GSLC masks are not.
     all_valid includes every native pixel with positive-area overlap.
     """
     check_reduction(source, target)
@@ -76,11 +71,17 @@ def reduce_gslc_mask(dataset, source: Grid, target: Grid, mode: str, tile_size: 
         inside = good.copy()
         if ey > ry and ex > cx:
             a = np.asarray(dataset[ry:ey, cx:ex])
-            if not np.isin(a, (0, 1, 255)).all():
-                raise ValueError("Unexpected GSLC mask codes; inspect product encoding")
+            if not np.issubdtype(a.dtype, np.integer) or np.any((a < 0) | (a > 255)):
+                values = np.unique(a)
+                raise ValueError(
+                    f"Expected uint8 GSLC subswath codes; got dtype={a.dtype}, "
+                    f"values={values[:20].tolist()} in {dataset.name}, "
+                    f"rows={ry}:{ey}, cols={cx}:{ex}"
+                )
+            valid = (a > 0) & (a < 255)
             args = ly - ry, hy - ry, lx - cx, hx - cx
             area = (a1 - a0)[:, None] * (b1 - b0)[None, :]
-            good = (_sums(a == 1, *args) == area) & (area > 0)
+            good = (_sums(valid, *args) == area) & (area > 0)
             inside = _sums(a != 255, *args) > 0
         yield win, good, inside
 
@@ -93,25 +94,19 @@ def prepare_gslc_mask_cache(
     mode: str = "all_valid",
     tile_size: int = 256,
     work_mb: int = 128,
+    resume: bool = True,
 ) -> dict[str, Path]:
-    """Cache each acquisition/frequency mask once per target grid and policy."""
+    """Write date/frequency masks; reuse existing files when resume is enabled."""
     if band not in ("A", "B"):
         raise ValueError("band must be A or B")
-    sig = {
-        "version": ALGORITHM_VERSION,
-        "source": stamp(source),
-        "band": band,
-        "grid": grid.record(),
-        "mode": mode,
-        "valid_values": [1],
-        "outside_values": [255],
-    }
-    folder = cache / key(sig)
-    if outputs := completed(folder, sig):
+    from opera_utils import get_dates
+
+    date = get_dates(source)[0].strftime("%Y%m%d")
+    cache.mkdir(parents=True, exist_ok=True)
+    outputs = {n: cache / f"{date}_{band}_{n}.tif" for n in ("valid", "inside")}
+    if resume and all(p.is_file() for p in outputs.values()):
         return outputs
-    folder.mkdir(parents=True, exist_ok=True)
-    attempt = Path(mkdtemp(prefix="attempt_", dir=folder))
-    outputs = {n: attempt / f"{n}.tif" for n in ("valid", "inside")}
+    temporary = {n: p.with_name(f"{p.stem}.partial.tif") for n, p in outputs.items()}
     with h5py.File(source, "r", rdcc_nbytes=16 * 1024**2) as h:
         g = h[f"/science/LSAR/GSLC/grids/frequency{band}"]
         x, y = np.asarray(g["xCoordinates"]), np.asarray(g["yCoordinates"])
@@ -132,13 +127,14 @@ def prepare_gslc_mask_cache(
         ratio = abs(grid.transform.a / dx * grid.transform.e / dy)
         tile = max(1, min(tile_size, int(np.sqrt(work_mb * 1024**2 / (64 * ratio)))))
         with (
-            rasterio.open(outputs["valid"], "w", **grid.profile("uint8")) as vd,
-            rasterio.open(outputs["inside"], "w", **grid.profile("uint8")) as fd,
+            rasterio.open(temporary["valid"], "w", **grid.profile("uint8")) as vd,
+            rasterio.open(temporary["inside"], "w", **grid.profile("uint8")) as fd,
         ):
             for win, valid, inside in reduce_gslc_mask(
                 g["mask"], native, grid, mode, tile
             ):
                 vd.write(valid.astype("uint8"), 1, window=win)
                 fd.write(inside.astype("uint8"), 1, window=win)
-    finish(folder, sig, outputs)
+    for name in outputs:
+        temporary[name].replace(outputs[name])
     return outputs

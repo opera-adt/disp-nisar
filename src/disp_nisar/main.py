@@ -41,6 +41,8 @@ from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
 logger = logging.getLogger(__name__)
 
+import rasterio
+from rasterio.warp import transform
 
 @log_runtime
 def run(
@@ -316,7 +318,35 @@ def run(
         cfg_freqB.output_options.bounds_epsg = cfg.output_options.bounds_epsg
         cfg_freqB.output_options.epsg = cfg.output_options.epsg
         cfg_freqB.timeseries_options.reference_point = (ref_point.row, ref_point.col)
+        b_vrt = (
+            cfg_freqB.work_directory
+            / "timeseries"
+            / "unw_network.vrt"
+        )
 
+        with rasterio.open(out_paths.timeseries_paths[0]) as src_a:
+            x, y = src_a.xy(ref_point.row, ref_point.col)
+            crs_a = src_a.crs
+
+        with rasterio.open(b_vrt) as src_b:
+            if crs_a != src_b.crs:
+                xs, ys = transform(crs_a, src_b.crs, [x], [y])
+                x, y = xs[0], ys[0]
+
+            row_b, col_b = src_b.index(x, y)
+
+            if not (0 <= row_b < src_b.height and 0 <= col_b < src_b.width):
+                raise ValueError(
+                    f"A reference falls outside B: {(row_b, col_b)}, "
+                    f"B shape={src_b.shape}"
+                )
+
+        cfg_freqB.timeseries_options.reference_point = (int(row_b), int(col_b))
+
+        logger.info(
+            "Reference pixel: A=(%d, %d), B=(%d, %d)",
+            ref_point.row, ref_point.col, row_b, col_b,
+        )
         # Note: implement and test carying compressed slcs
         # with forward/historical mode, for workflow with freqB
         # probably keep it same as freqA to keep it consistent
@@ -420,8 +450,11 @@ def _run_main_diff_workflow(
     method = getattr(
         cfg_b.unwrap_options.unwrap_method, "value", cfg_b.unwrap_options.unwrap_method
     )
-    if method != "snaphu":
-        raise ValueError("main_diff requires SNAPHU in the frequencyB algorithm file")
+    if method not in ("snaphu", "whirlwind"):
+        raise ValueError(
+            "main_diff requires snaphu or whirlwind in the frequencyB "
+            f"algorithm file; received {method!r}"
+        )
     # Reuse the prepared binary mask, not the raw water-distance ancillary.
     cfg_b.mask_file = cfg.mask_file
     cfg_b.unwrap_options.run_unwrap = False
@@ -573,6 +606,7 @@ def create_products(
         _assert_dates_match(
             disp_date_keys, out_paths.ionospheric_corrections, "ionosphere"
         )
+    matching_water_binary_mask = None
 
     combined_mask_file = cfg.work_directory / "combined_water_nodata_mask.tif"
 
@@ -592,8 +626,14 @@ def create_products(
 
     if pge_runconfig.dynamic_ancillary_file_group.mask_file:
         # Combine masks: water + GSLC + nodata
-        matching_water_binary_mask = water_gslc_mask_warped
-        if water_gslc_mask_warped is not None:
+        matching_water_binary_mask = None
+
+        if (
+            pge_runconfig.dynamic_ancillary_file_group.mask_file
+            and water_gslc_mask_warped is not None
+        ):
+            matching_water_binary_mask = water_gslc_mask_warped
+
             create_combined_mask(
                 mask_filename=matching_water_binary_mask,
                 image_filename=out_paths.timeseries_paths[0],
@@ -601,6 +641,8 @@ def create_products(
             )
         else:
             matching_water_binary_mask = None
+
+            # A validity mask is still required without an ancillary water mask.
             _create_nodata_mask(
                 filename=out_paths.timeseries_paths[0],
                 output_filename=combined_mask_file,
@@ -632,6 +674,32 @@ def create_products(
         if method in ("snaphu", "phass", "whirlwind"):
             row_looks, col_looks = cfg.phase_linking.half_window.to_looks()
             nlooks = row_looks * col_looks
+
+            # Build the required mask immediately before conncomp regrowth.
+            combined_mask_file = (
+                cfg.work_directory / "combined_water_nodata_mask.tif"
+            )
+
+            if (
+                pge_runconfig.dynamic_ancillary_file_group.mask_file
+                and water_gslc_mask_warped is not None
+            ):
+                create_combined_mask(
+                    mask_filename=water_gslc_mask_warped,
+                    image_filename=out_paths.timeseries_paths[0],
+                    output_filename=combined_mask_file,
+                )
+            else:
+                _create_nodata_mask(
+                    filename=out_paths.timeseries_paths[0],
+                    output_filename=combined_mask_file,
+                )
+
+            if not combined_mask_file.is_file():
+                raise FileNotFoundError(
+                    f"Mask creation returned without creating: {combined_mask_file}"
+                )
+
             out_paths.conncomp_paths = _update_snaphu_conncomps(
                 timeseries_paths=timeseries_rad_paths,
                 stitched_cor_paths=out_paths.stitched_cor_paths,
@@ -1108,10 +1176,21 @@ def create_displacement_products(
         )
 
 
-def _create_nodata_mask(filename: PathOrStr, output_filename: PathOrStr) -> None:
-    # Mark nodata as 0/False, valid as 1/True
-    mask = io.load_gdal(filename, masked=True).filled(0) != 0
-    # A valid output has to be valid in the mask, AND not be a `nodata`
+def _create_nodata_mask(
+    filename: PathOrStr,
+    output_filename: PathOrStr,
+) -> None:
+    """Write 1 for valid finite pixels and 0 for invalid pixels."""
+    image = io.load_gdal(filename, masked=True)
+
+    valid = (
+        ~np.ma.getmaskarray(image)
+        & np.isfinite(np.ma.getdata(image))
+    )
+
     io.write_arr(
-        like_filename=filename, arr=mask, nodata=255, output_name=output_filename
+        like_filename=filename,
+        arr=valid.astype(np.uint8),
+        nodata=255,
+        output_name=output_filename,
     )

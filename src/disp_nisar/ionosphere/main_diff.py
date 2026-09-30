@@ -1,4 +1,9 @@
-"""A/(A-B) estimation on the B IFG grid, with bounded preparation and inversion.
+"""A/(A-B) estimation with fixed date-based output paths.
+
+Resume checks final-file existence only. Changing inputs, reference, grid or
+settings requires resume=False (for the entire rerun), or removal of affected
+outputs and all dependent stages. Hash/attempt caches are not auto-migrated.
+Preparation/inversion are windowed; gap filling uses one full B-grid array.
 
 Dolphin/SNAPHU still controls unwrap memory. Phase-linked SLCs are consumed through
 existing stitched IFGs; independent A/B displacement series are not mixed here.
@@ -9,9 +14,7 @@ from __future__ import annotations
 import logging
 from contextlib import ExitStack
 from dataclasses import dataclass
-from importlib.metadata import version
 from pathlib import Path
-from tempfile import mkdtemp
 from typing import Sequence
 
 import numpy as np
@@ -21,19 +24,15 @@ from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
 from ._main_diff_io import (
-    ALGORITHM_VERSION,
     Grid,
     atomic_json,
     check_reduction,
-    completed,
-    finish,
-    key,
     read_window,
-    stamp,
     windows,
 )
 from .gslc_mask import prepare_gslc_mask_cache
 from .inversion import build_design_matrix, invert_common_phase_block
+from .mask import apply_similarity_mask_and_fill
 from .options import IonosphereOptions
 from .resampling import average_to_window, resample_phasor_to_match, source_window
 
@@ -209,11 +208,17 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
     method = getattr(
         unwrap_options.unwrap_method, "value", unwrap_options.unwrap_method
     )
-    if method != "snaphu":
-        raise ValueError("main_diff initial implementation requires SNAPHU")
+    if method not in ("snaphu", "whirlwind"):
+        raise ValueError(
+            f"main_diff supports snaphu or whirlwind; received {method!r}"
+        )
     result = dict(prepared)
     for band in ("A", "D"):
         cfg = unwrap_options.model_copy(deep=True)
+        if method == "whirlwind":
+            # Use the existing GSLC/quality-aware Dolphin interpolation.
+            # Avoid a second interpolation inside Whirlwind.
+            cfg.whirlwind_options.interpolate = False
         cfg.run_unwrap = True
         cfg.run_interpolation = True
         cfg.zero_where_masked = False
@@ -261,8 +266,8 @@ def select_common_reference(
 ) -> tuple[int, int]:
     """Choose a common donor after all A/D unwrapping, writing candidates on disk.
 
-    Require finite A/D phase and positive components in every pair. Compare
-    component identities only within a pair. Avoid a full-frame distance transform.
+    Require original donors with finite A/D phase in every pair.
+    Connected-component labels are not used. Avoid a full-frame distance transform.
     """
     with rasterio.open(output, "w", **grid.profile("uint8")) as ds:
         for win in windows(grid, block_size):
@@ -298,7 +303,7 @@ def select_common_reference(
                 best = candidate
     if best is None:
         raise ValueError(
-            "No common A/D reference survives masks and components; completed unwraps"
+            "No common A/D reference survives donor and finite-phase checks; completed unwraps"
             " are retained"
         )
     return best[1], best[2]
@@ -477,6 +482,16 @@ def _run_locked(
 ):
     if not products:
         return []
+    final_paths = [
+        out_dir / "corrections" /
+        ("_".join(d.strftime("%Y%m%d") for d in _date_pair(Path(p))) + "_iono.tif")
+        for p in products
+    ]
+    if len(set(final_paths)) != len(final_paths):
+        raise ValueError("Duplicate output date pairs")
+    if options.resume and all(p.is_file() for p in final_paths):
+        logger.info("Reusing all existing ionosphere corrections")
+        return final_paths
     estimate_iono_main_diff(f_a, f_b, np.zeros(1), np.zeros(1))
     maps = {
         "ifg_A": _index(band_a.interferograms),
@@ -512,6 +527,19 @@ def _run_locked(
     origin = int(np.floor(rb)), int(np.floor(cb))
     if not (0 <= origin[0] < target.height and 0 <= origin[1] < target.width):
         raise ValueError("Nominal A reference is outside the B grid")
+    raw_paths = [
+        out_dir / "timeseries" /
+        ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B.rad.tif")
+        for pair in output_pairs
+    ]
+    inversion_ready = options.resume and all(p.is_file() for p in raw_paths)
+    need_masks = not inversion_ready or any(
+        not final.is_file() and not (
+            out_dir / "timeseries" /
+            ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B_filled.rad.tif")
+        ).is_file()
+        for pair, final in zip(output_pairs, final_paths, strict=True)
+    )
     cached_masks = {
         (d, b): prepare_gslc_mask_cache(
             Path(gslc_by_date[d]),
@@ -521,12 +549,13 @@ def _run_locked(
             options.mask_reduction,
             options.block_size,
             options.mask_work_mb,
+            resume=options.resume,
         )
         for d in dates
         for b in ("A", "B")
-    }
+    } if need_masks else {}
     jobs = []
-    for i, pair in enumerate(pairs, 1):
+    for i, pair in enumerate([] if inversion_ready else pairs, 1):
         name = "_".join(d.strftime("%Y%m%d") for d in pair)
         inputs = {n: m[pair] for n, m in maps.items()}
         inputs.update(sim_A=Path(band_a.similarity), sim_B=Path(band_b.similarity))
@@ -536,73 +565,145 @@ def _run_locked(
             for role, d in zip(("ref", "sec"), pair, strict=True)
             for kind in ("valid", "inside")
         }
-        sig = {
-            "version": ALGORITHM_VERSION,
-            "dolphin": version("dolphin"),
-            "inputs": {n: stamp(p) for n, p in inputs.items()},
-            "masks": {n: stamp(p) for n, p in masks.items()},
-            "grid": target.record(),
-            "options": options.model_dump(exclude={"resume"}),
-            "unwrap": unwrap_options.model_dump(mode="json"),
+        folder = out_dir / "pairs" / name
+        folder.mkdir(parents=True, exist_ok=True)
+
+        # These are the files consumed by reference selection and inversion.
+        ready = {
+            "A_unw": folder / "A.unw.tif",
+            "D_unw": folder / "D.unw.tif",
+            "donor": folder / "donor.tif",
         }
-        folder = out_dir / "pairs" / name / key(sig)
-        ready = completed(folder, sig) if options.resume else None
-        if ready is None:
-            folder.mkdir(parents=True, exist_ok=True)
-            attempt = Path(mkdtemp(prefix="attempt_", dir=folder))
-            ready = _unwrap_pair(
-                _prepare_pair(inputs, masks, target, attempt, options),
-                attempt,
+
+        if options.resume and all(p.is_file() for p in ready.values()):
+            status = "reused"
+        else:
+            # One fixed working directory, not a new attempt directory each time.
+            import shutil
+
+            work = folder / "_partial"
+            if work.exists():
+                shutil.rmtree(work)
+            work.mkdir()
+
+            generated = _unwrap_pair(
+                _prepare_pair(inputs, masks, target, work, options),
+                work,
                 unwrap_options,
                 options,
             )
-            finish(folder, sig, ready)
-            status = "prepared"
-        else:
-            status = "cached"
+
+            # Publish only after the pair processing completed successfully.
+            ready = {}
+            for key_name, path in generated.items():
+                destination = folder / path.name
+                path.replace(destination)
+                ready[key_name] = destination
+
+            if not options.keep_intermediates:
+                shutil.rmtree(work)
+
+            status = "processed"
+
         logger.info("[%d/%d] %s: %s", i, len(pairs), name, status)
         jobs.append(ready)
-    request = {
-        "version": ALGORITHM_VERSION,
-        "frequency": [f_a, f_b],
-        "reference_a": list(reference_a),
-        "grid": pg.record(),
-        "outputs": [stamp(Path(p)) for p in products],
-        "jobs": [
-            {n: stamp(j[n]) for n in ("A_unw", "D_unw", "A_cc", "D_cc", "donor")}
-            for j in jobs
-        ],
+
+    fill_settings = {
+        "fill_method": "gaussian",
+        "smooth_sigma": 50.0,
+        "mask_erosion_px": 3,
     }
-    folder = out_dir / "timeseries" / key(request)
-    if options.resume and (cached := completed(folder, request)):
-        return [cached[str(i)] for i in range(len(products))]
-    folder.mkdir(parents=True, exist_ok=True)
-    attempt = Path(mkdtemp(prefix="attempt_", dir=folder))
-    reference = select_common_reference(
-        jobs, target, origin, attempt / "common_candidates.tif", options.block_size
-    )
-    atomic_json(
-        attempt / "reference.json",
-        {"reference_b": list(reference), "reference_a": list(reference_a)},
-    )
-    intermediate = [attempt / f"{i}_iono_B.rad.tif" for i in range(len(products))]
-    _invert_jobs(
-        jobs,
-        pairs,
-        target,
-        reference,
-        f_a,
-        f_b,
-        intermediate,
-        output_pairs,
-        options.block_size,
-    )
-    outputs = {}
-    for i, (src, match) in enumerate(zip(intermediate, products, strict=True)):
-        name = "_".join(d.strftime("%Y%m%d") for d in output_pairs[i])
-        outputs[str(i)] = attempt / f"{name}_iono.tif"
-        _export_correction(
-            src, Path(match), outputs[str(i)], f_a, reference_a, options.block_size
+    timeseries_dir = out_dir / "timeseries"
+    correction_dir = out_dir / "corrections"
+    timeseries_dir.mkdir(parents=True, exist_ok=True)
+    correction_dir.mkdir(parents=True, exist_ok=True)
+    names = ["_".join(d.strftime("%Y%m%d") for d in pair) for pair in output_pairs]
+    intermediate = [timeseries_dir / f"{name}_iono_B.rad.tif" for name in names]
+
+    if options.resume and all(p.is_file() for p in intermediate):
+        logger.info("Reusing existing ionosphere inversion results")
+    else:
+        reference = select_common_reference(
+            jobs, target, origin, timeseries_dir / "common_candidates.tif",
+            options.block_size,
         )
-    finish(folder, request, outputs)
-    return list(outputs.values())
+        atomic_json(
+            timeseries_dir / "reference.json",
+            {"reference_b": list(reference), "reference_a": list(reference_a)},
+        )
+        temporary = [p.with_name(f"{p.stem}.partial.tif") for p in intermediate]
+        _invert_jobs(
+            jobs, pairs, target, reference, f_a, f_b, temporary,
+            output_pairs, options.block_size,
+        )
+        for source, destination in zip(temporary, intermediate, strict=True):
+            source.replace(destination)
+
+    outputs = []
+    for i, (src, match, name) in enumerate(zip(intermediate, products, names, strict=True)):
+        output_path = correction_dir / f"{name}_iono.tif"
+        outputs.append(output_path)
+        if options.resume and output_path.is_file():
+            logger.info("%s: reusing correction", name)
+            continue
+
+        filled_path = timeseries_dir / f"{name}_iono_B_filled.rad.tif"
+        if options.resume and filled_path.is_file():
+            logger.info("%s: reusing filled ionosphere", name)
+        else:
+            with rasterio.open(src) as ds:
+                iono = ds.read(1, masked=True).astype(np.float32).filled(np.nan)
+            footprint = np.ones(iono.shape, dtype=bool)
+            for date in output_pairs[i]:
+                for band in ("A", "B"):
+                    with rasterio.open(cached_masks[date, band]["inside"]) as mask_ds:
+                        with WarpedVRT(
+                            mask_ds, crs=target.crs, transform=target.transform,
+                            width=target.width, height=target.height,
+                            resampling=Resampling.average, src_nodata=255,
+                            nodata=255, dtype="float32",
+                        ) as mask_vrt:
+                            inside = mask_vrt.read(1, masked=True).filled(0)
+                    footprint &= inside > 0
+            trusted = footprint & np.isfinite(iono)
+            if not trusted.any():
+                raise ValueError(f"{name}: no valid ionosphere samples for filling")
+
+            # Existing helper erodes invalid stripes along columns. Check donors
+            # before calling it: a Gaussian fill with no donors is undefined.
+            from scipy.ndimage import maximum_filter1d
+
+            radius = fill_settings["mask_erosion_px"]
+            eroded_donors = footprint & ~maximum_filter1d(
+                (~trusted).astype(np.uint8), size=2 * radius + 1, axis=1,
+            ).astype(bool)
+            if not eroded_donors.any():
+                raise ValueError(f"{name}: no donors remain after mask erosion")
+
+            iono_filled, quality_mask = apply_similarity_mask_and_fill(
+                iono=iono, sim_mask=trusted, existing_mask=footprint,
+                **fill_settings,
+            )
+            logger.info(
+                "%s: ionosphere valid before=%d, after=%d", name,
+                np.count_nonzero(trusted), np.count_nonzero(np.isfinite(iono_filled)),
+            )
+            temporary_filled = filled_path.with_name(f"{filled_path.stem}.partial.tif")
+            with rasterio.open(
+                temporary_filled, "w", **target.profile("float32", np.nan),
+            ) as dst:
+                dst.write(iono_filled.astype(np.float32), 1)
+                dst.set_band_unit(1, "radians")
+                dst.update_tags(
+                    ionosphere_method="main_diff",
+                    phase_convention="dolphin_ifg_ref_times_conj_sec",
+                )
+            temporary_filled.replace(filled_path)
+
+        temporary_output = output_path.with_name(f"{output_path.stem}.partial.tif")
+        _export_correction(
+            filled_path, Path(match), temporary_output, f_a, reference_a,
+            options.block_size,
+        )
+        temporary_output.replace(output_path)
+    return outputs
