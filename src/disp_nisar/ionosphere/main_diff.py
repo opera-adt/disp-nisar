@@ -1089,4 +1089,3 @@ def _run_locked(
         )
         temporary_output.replace(output_path)
     return outputs
-

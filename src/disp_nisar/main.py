@@ -41,9 +41,6 @@ from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
 logger = logging.getLogger(__name__)
 
-import rasterio
-from rasterio.warp import transform
-
 
 @log_runtime
 def run(
@@ -306,7 +303,7 @@ def run(
             run_ionosphere_estimation,
         )
 
-        ref_point = read_reference_point(out_paths.timeseries_paths[0].parent)
+        read_reference_point(out_paths.timeseries_paths[0].parent)
 
         # if GUNW are not specified, run splitspectrum based on freq.A/B
         # load algorithm_ionosphere_parameters.yaml for freq.B
@@ -1003,8 +1000,7 @@ def process_product(
 
         if ionosphere_method in ("main_diff", "main_side") and not is_meters:
             raise ValueError(
-                f"{ionosphere_method} correction must declare meters; "
-                f"got {unit!r}"
+                f"{ionosphere_method} correction must declare meters; got {unit!r}"
             )
 
         # Retain the existing conversion for other, non-meter inputs.
