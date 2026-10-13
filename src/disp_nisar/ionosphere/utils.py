@@ -177,35 +177,27 @@ def smooth_iono(
     arr: np.ndarray,
     sigma: float | tuple[float, float],
     mask: np.ndarray | None = None,
+    *,
+    restore_mask: bool = True,
 ) -> np.ndarray:
-    """Gaussian low-pass filter with nearest-neighbour gap-filling.
+    """Nearest-fill gaps, Gaussian smooth, optionally restore masked pixels."""
+    valid = np.isfinite(arr)
 
-    Gaps (NaN or ``mask == False``) are filled via nearest-neighbour before
-    filtering so they do not bleed into valid regions, then restored to NaN.
+    if mask is not None:
+        valid &= np.asarray(mask, dtype=bool)
 
-    Parameters
-    ----------
-    arr : np.ndarray
-        Ionosphere phase or displacement array.  NaN = invalid.
-    sigma : float or (sig_row, sig_col)
-        Gaussian standard deviation in pixels.
-    mask : np.ndarray of bool, optional
-        Valid-pixel mask.  If None, uses ``np.isfinite(arr)``.
+    if not valid.any():
+        raise ValueError("No finite donor pixels available for smoothing")
 
-    Returns
-    -------
-    np.ndarray
-        Smoothed array, same shape.  NaN where ``mask`` is False.
+    filled = _nn_fill(arr, valid)
+    smoothed = gaussian_filter(
+        filled.astype(np.float64),
+        sigma=sigma,
+    ).astype(np.float32)
 
-    """
-    if mask is None:
-        mask = np.isfinite(arr)
+    if restore_mask:
+        smoothed[~valid] = np.nan
 
-    filled = _nn_fill(arr, mask)
-    smoothed = gaussian_filter(filled.astype(np.float64), sigma=sigma).astype(
-        np.float32
-    )
-    smoothed[~mask] = np.nan
     return smoothed
 
 

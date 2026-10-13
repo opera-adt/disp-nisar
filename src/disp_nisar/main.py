@@ -69,11 +69,11 @@ def run(
     processing_start_datetime = datetime.now(timezone.utc)
 
     ionosphere_options = pge_runconfig.get_ionosphere_options()
-    use_main_diff = (
+    use_shared_ionosphere = (
         not pge_runconfig.dynamic_ancillary_file_group.gunw_files
-        and ionosphere_options.method == "main_diff"
+        and ionosphere_options.method in ("main_side", "main_diff")
     )
-    if use_main_diff:
+    if use_shared_ionosphere:
         if pge_runconfig.input_file_group.frequency != "frequencyA":
             raise ValueError("main_diff requires a nominal frequencyA workflow")
         if (
@@ -290,7 +290,7 @@ def run(
     )
 
     # IONOSPHERE
-    if use_main_diff:
+    if use_shared_ionosphere:
         out_paths.ionospheric_corrections = _run_main_diff_workflow(
             cfg,
             pge_runconfig,
@@ -317,36 +317,9 @@ def run(
         cfg_freqB.output_options.bounds = cfg.output_options.bounds
         cfg_freqB.output_options.bounds_epsg = cfg.output_options.bounds_epsg
         cfg_freqB.output_options.epsg = cfg.output_options.epsg
-        cfg_freqB.timeseries_options.reference_point = (ref_point.row, ref_point.col)
-        b_vrt = (
-            cfg_freqB.work_directory
-            / "timeseries"
-            / "unw_network.vrt"
-        )
 
-        with rasterio.open(out_paths.timeseries_paths[0]) as src_a:
-            x, y = src_a.xy(ref_point.row, ref_point.col)
-            crs_a = src_a.crs
+        cfg_freqB.timeseries_options.reference_point = None
 
-        with rasterio.open(b_vrt) as src_b:
-            if crs_a != src_b.crs:
-                xs, ys = transform(crs_a, src_b.crs, [x], [y])
-                x, y = xs[0], ys[0]
-
-            row_b, col_b = src_b.index(x, y)
-
-            if not (0 <= row_b < src_b.height and 0 <= col_b < src_b.width):
-                raise ValueError(
-                    f"A reference falls outside B: {(row_b, col_b)}, "
-                    f"B shape={src_b.shape}"
-                )
-
-        cfg_freqB.timeseries_options.reference_point = (int(row_b), int(col_b))
-
-        logger.info(
-            "Reference pixel: A=(%d, %d), B=(%d, %d)",
-            ref_point.row, ref_point.col, row_b, col_b,
-        )
         # Note: implement and test carying compressed slcs
         # with forward/historical mode, for workflow with freqB
         # probably keep it same as freqA to keep it consistent
@@ -493,7 +466,7 @@ def _run_main_diff_workflow(
         reference_a=(ref.row, ref.col),
         f_a=frequencies[0],
         f_b=frequencies[1],
-        out_dir=cfg.work_directory / "ionosphere_main_diff",
+        out_dir=cfg.work_directory / f"ionosphere_{options.method}",
         unwrap_options=cfg_b.unwrap_options,
         options=options,
     )
@@ -1024,10 +997,19 @@ def process_product(
         import rasterio
 
         with rasterio.open(files.ionosphere) as iono_ds:
-            is_main_diff = iono_ds.tags().get("ionosphere_method") == "main_diff"
-            if is_main_diff and iono_ds.units[0] != "meters":
-                raise ValueError("main_diff correction must declare meters")
-        if not is_main_diff:
+            ionosphere_method = iono_ds.tags().get("ionosphere_method")
+            unit = (iono_ds.units[0] or "").strip().lower()
+
+        is_meters = unit in ("m", "meter", "meters", "metre", "metres")
+
+        if ionosphere_method in ("main_diff", "main_side") and not is_meters:
+            raise ValueError(
+                f"{ionosphere_method} correction must declare meters; "
+                f"got {unit!r}"
+            )
+
+        # Retain the existing conversion for other, non-meter inputs.
+        if not is_meters:
             iono_radians *= wavelength / (4.0 * np.pi)
         corrections["ionosphere"] = iono_radians
     else:
