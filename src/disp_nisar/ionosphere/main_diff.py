@@ -351,9 +351,7 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
     bands = ("A", second)
 
     unwrap_method = getattr(
-        unwrap_options.unwrap_method,
-        "value",
-        unwrap_options.unwrap_method,
+        unwrap_options.unwrap_method, "value", unwrap_options.unwrap_method,
     )
     if unwrap_method not in ("snaphu", "whirlwind"):
         raise ValueError(
@@ -374,6 +372,7 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
             f"Missing prepared inputs for {ionosphere_method}: "
             f"{sorted(missing)}"
         )
+
 
     result = dict(prepared)
 
@@ -481,6 +480,7 @@ def select_common_reference(
         raise ValueError(
             f"No common A/{second} reference survives donor and "
             "finite-phase checks; completed unwraps are retained"
+
         )
     return best[1], best[2]
 
@@ -761,8 +761,9 @@ def _run_locked(
     if not products:
         return []
     final_paths = [
-        out_dir / "corrections" /
-        ("_".join(d.strftime("%Y%m%d") for d in _date_pair(Path(p))) + "_iono.tif")
+        out_dir
+        / "corrections"
+        / ("_".join(d.strftime("%Y%m%d") for d in _date_pair(Path(p))) + "_iono.tif")
         for p in products
     ]
     if len(set(final_paths)) != len(final_paths):
@@ -810,32 +811,39 @@ def _run_locked(
     if not (0 <= origin[0] < target.height and 0 <= origin[1] < target.width):
         raise ValueError("Nominal A reference is outside the B grid")
     raw_paths = [
-        out_dir / "timeseries" /
-        ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B.rad.tif")
+        out_dir
+        / "timeseries"
+        / ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B.rad.tif")
         for pair in output_pairs
     ]
     inversion_ready = options.resume and all(p.is_file() for p in raw_paths)
     need_masks = not inversion_ready or any(
-        not final.is_file() and not (
-            out_dir / "timeseries" /
-            ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B_filled.rad.tif")
+        not final.is_file()
+        and not (
+            out_dir
+            / "timeseries"
+            / ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B_filled.rad.tif")
         ).is_file()
         for pair, final in zip(output_pairs, final_paths, strict=True)
     )
-    cached_masks = {
-        (d, b): prepare_gslc_mask_cache(
-            Path(gslc_by_date[d]),
-            b,
-            grids[b],
-            out_dir / "masks",
-            options.mask_reduction,
-            options.block_size,
-            options.mask_work_mb,
-            resume=options.resume,
-        )
-        for d in dates
-        for b in ("A", "B")
-    } if need_masks else {}
+    cached_masks = (
+        {
+            (d, b): prepare_gslc_mask_cache(
+                Path(gslc_by_date[d]),
+                b,
+                grids[b],
+                out_dir / "masks",
+                options.mask_reduction,
+                options.block_size,
+                options.mask_work_mb,
+                resume=options.resume,
+            )
+            for d in dates
+            for b in ("A", "B")
+        }
+        if need_masks
+        else {}
+    )
     jobs = []
     for i, pair in enumerate([] if inversion_ready else pairs, 1):
         name = "_".join(d.strftime("%Y%m%d") for d in pair)
@@ -923,8 +931,16 @@ def _run_locked(
         logger.info("Reusing existing ionosphere inversion results")
     else:
         reference = select_common_reference(
+<<<<<<< HEAD
             jobs, target, origin, timeseries_dir / "common_candidates.tif",
             options.block_size,  method=method,
+=======
+            jobs,
+            target,
+            origin,
+            timeseries_dir / "common_candidates.tif",
+            options.block_size,
+>>>>>>> origin/ionosphere_main_diff_initial
         )
         atomic_json(
             timeseries_dir / "reference.json",
@@ -941,13 +957,18 @@ def _run_locked(
             temporary,
             output_pairs,
             options.block_size,
+<<<<<<< HEAD
             method=method,
+=======
+>>>>>>> origin/ionosphere_main_diff_initial
         )
         for source, destination in zip(temporary, intermediate, strict=True):
             source.replace(destination)
 
     outputs = []
-    for i, (src, match, name) in enumerate(zip(intermediate, products, names, strict=True)):
+    for i, (src, match, name) in enumerate(
+        zip(intermediate, products, names, strict=True)
+    ):
         output_path = correction_dir / f"{name}_iono.tif"
         outputs.append(output_path)
         if options.resume and output_path.is_file():
@@ -965,10 +986,15 @@ def _run_locked(
                 for band in ("A", "B"):
                     with rasterio.open(cached_masks[date, band]["inside"]) as mask_ds:
                         with WarpedVRT(
-                            mask_ds, crs=target.crs, transform=target.transform,
-                            width=target.width, height=target.height,
-                            resampling=Resampling.average, src_nodata=255,
-                            nodata=255, dtype="float32",
+                            mask_ds,
+                            crs=target.crs,
+                            transform=target.transform,
+                            width=target.width,
+                            height=target.height,
+                            resampling=Resampling.average,
+                            src_nodata=255,
+                            nodata=255,
+                            dtype="float32",
                         ) as mask_vrt:
                             inside = mask_vrt.read(1, masked=True).filled(0)
                     footprint &= inside > 0
@@ -1029,14 +1055,19 @@ def _run_locked(
                 "%s reference after footprint: %s",
                 name,
                 float(iono_filled[rr, cc]),
+
             )
             logger.info(
-                "%s: ionosphere valid before=%d, after=%d", name,
-                np.count_nonzero(trusted), np.count_nonzero(np.isfinite(iono_filled)),
+                "%s: ionosphere valid before=%d, after=%d",
+                name,
+                np.count_nonzero(trusted),
+                np.count_nonzero(np.isfinite(iono_filled)),
             )
             temporary_filled = filled_path.with_name(f"{filled_path.stem}.partial.tif")
             with rasterio.open(
-                temporary_filled, "w", **target.profile("float32", np.nan),
+                temporary_filled,
+                "w",
+                **target.profile("float32", np.nan),
             ) as dst:
                 dst.write(iono_filled.astype(np.float32), 1)
                 dst.set_band_unit(1, "radians")

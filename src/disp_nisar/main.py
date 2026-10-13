@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 import rasterio
 from rasterio.warp import transform
 
+
 @log_runtime
 def run(
     cfg: DisplacementWorkflow,
@@ -649,9 +650,7 @@ def create_products(
             nlooks = row_looks * col_looks
 
             # Build the required mask immediately before conncomp regrowth.
-            combined_mask_file = (
-                cfg.work_directory / "combined_water_nodata_mask.tif"
-            )
+            combined_mask_file = cfg.work_directory / "combined_water_nodata_mask.tif"
 
             if (
                 pge_runconfig.dynamic_ancillary_file_group.mask_file
@@ -1165,10 +1164,7 @@ def _create_nodata_mask(
     """Write 1 for valid finite pixels and 0 for invalid pixels."""
     image = io.load_gdal(filename, masked=True)
 
-    valid = (
-        ~np.ma.getmaskarray(image)
-        & np.isfinite(np.ma.getdata(image))
-    )
+    valid = ~np.ma.getmaskarray(image) & np.isfinite(np.ma.getdata(image))
 
     io.write_arr(
         like_filename=filename,
