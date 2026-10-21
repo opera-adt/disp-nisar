@@ -9,10 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import rasterio  # used only by resample_to_match (in-memory reproject)
+import rasterio
 from dolphin import io
 from rasterio.enums import Resampling
 from rasterio.warp import reproject as rio_reproject
+from rasterio.windows import Window, bounds, from_bounds, transform
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 # ---------------------------------------------------------------------------
@@ -21,6 +22,18 @@ from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 C_LIGHT = 299_792_458.0  # speed of light, m/s
 
+
+# ---------------------------------------------------------------------------
+# Tiff options
+# ---------------------------------------------------------------------------
+
+WORKING_TIFF_OPTIONS = [
+    "COMPRESS=LZW",
+    "TILED=YES",
+    "BLOCKXSIZE=256",
+    "BLOCKYSIZE=256",
+    "BIGTIFF=IF_SAFER",
+]
 
 # ---------------------------------------------------------------------------
 # Unit conversions
@@ -177,35 +190,27 @@ def smooth_iono(
     arr: np.ndarray,
     sigma: float | tuple[float, float],
     mask: np.ndarray | None = None,
+    *,
+    restore_mask: bool = True,
 ) -> np.ndarray:
-    """Gaussian low-pass filter with nearest-neighbour gap-filling.
+    """Nearest-fill gaps, Gaussian smooth, optionally restore masked pixels."""
+    valid = np.isfinite(arr)
 
-    Gaps (NaN or ``mask == False``) are filled via nearest-neighbour before
-    filtering so they do not bleed into valid regions, then restored to NaN.
+    if mask is not None:
+        valid &= np.asarray(mask, dtype=bool)
 
-    Parameters
-    ----------
-    arr : np.ndarray
-        Ionosphere phase or displacement array.  NaN = invalid.
-    sigma : float or (sig_row, sig_col)
-        Gaussian standard deviation in pixels.
-    mask : np.ndarray of bool, optional
-        Valid-pixel mask.  If None, uses ``np.isfinite(arr)``.
+    if not valid.any():
+        raise ValueError("No finite donor pixels available for smoothing")
 
-    Returns
-    -------
-    np.ndarray
-        Smoothed array, same shape.  NaN where ``mask`` is False.
+    filled = _nn_fill(arr, valid)
+    smoothed = gaussian_filter(
+        filled.astype(np.float64),
+        sigma=sigma,
+    ).astype(np.float32)
 
-    """
-    if mask is None:
-        mask = np.isfinite(arr)
+    if restore_mask:
+        smoothed[~valid] = np.nan
 
-    filled = _nn_fill(arr, mask)
-    smoothed = gaussian_filter(filled.astype(np.float64), sigma=sigma).astype(
-        np.float32
-    )
-    smoothed[~mask] = np.nan
     return smoothed
 
 
@@ -265,6 +270,245 @@ def resample_to_match(
         )
 
     return dst_data
+
+
+def check_reduction(source: Grid, target: Grid) -> None:
+    """Validate source and target grids for spatial reduction.
+
+    Require north-up, unrotated grids with matching coordinate reference
+    systems. Target pixel sizes must be equal to or larger than source
+    pixel sizes in both axes, allowing a relative tolerance of 1e-8.
+
+    This function only validates grid compatibility. It does not resample
+    data or require matching grid origins or integer pixel-size ratios.
+
+    Parameters
+    ----------
+    source : Grid
+        Source raster grid with a defined CRS, positive x pixel spacing,
+        negative y pixel spacing, and no rotation or shear.
+    target : Grid
+        Target raster grid satisfying the same requirements.
+        Must not be finer than ``source`` in either axis.
+
+    Returns
+    -------
+    None
+        Return normally if both grids satisfy the requirements.
+
+    Raises
+    ------
+    ValueError
+        If either grid has no CRS, is not north-up, or contains rotation
+        or shear; if the coordinate reference systems differ; or if the
+        target grid is finer than the source grid in either axis.
+
+    """
+    for grid in (source, target):
+        t = grid.transform
+        if grid.crs is None or t.a <= 0 or t.e >= 0 or t.b != 0 or t.d != 0:
+            raise ValueError("Spatial reduction requires north-up georeferenced grids")
+
+    if source.crs != target.crs:
+        raise ValueError("Spatial reduction requires matching source/target CRS")
+
+    if target.transform.a < source.transform.a * (1 - 1e-8) or abs(
+        target.transform.e
+    ) < abs(source.transform.e) * (1 - 1e-8):
+        raise ValueError("Target must not be finer than source in either axis")
+
+
+def source_window(
+    source: Grid,
+    target: Grid,
+    window: Window,
+) -> Window:
+    """Find the source window covering a target window.
+
+    Convert the target window bounds to source pixel coordinates, round
+    outward, and add one source pixel of padding on each side.
+
+    Parameters
+    ----------
+    source : Grid
+        Source raster grid.
+    target : Grid
+        Target raster grid. Must have the same CRS as ``source`` and
+        must not be finer in either axis.
+    window : Window
+        Window in target pixel coordinates.
+
+    Returns
+    -------
+    Window
+        Window in source pixel coordinates, including padding.
+        May extend beyond the source raster bounds; the caller must
+        handle out-of-bounds reads.
+
+    Raises
+    ------
+    ValueError
+        If the source and target grids do not support reduction.
+
+    """
+    check_reduction(source, target)
+
+    src_window = from_bounds(
+        *bounds(window, target.transform),
+        transform=source.transform,
+    )
+
+    col_start = int(np.floor(src_window.col_off)) - 1
+    row_start = int(np.floor(src_window.row_off)) - 1
+    col_stop = int(np.ceil(src_window.col_off + src_window.width)) + 1
+    row_stop = int(np.ceil(src_window.row_off + src_window.height)) + 1
+
+    return Window(
+        col_start,
+        row_start,
+        col_stop - col_start,
+        row_stop - row_start,
+    )
+
+
+def average_to_window(
+    a: np.ndarray,
+    source: Grid,
+    src_window: Window,
+    target: Grid,
+    dst_window: Window,
+) -> np.ndarray:
+    """Area-average a source array onto a target window.
+
+    Use pixel-overlap weights to average source values onto the target
+    grid. Zeros are included in the average; no nodata value is declared.
+    The caller must prepare finite input values before calling.
+
+    Parameters
+    ----------
+    a : np.ndarray
+        Two-dimensional source array corresponding to ``src_window``.
+        Invalid contributions should be represented by zero when
+        computing masked sums or valid-area fractions.
+    source : Grid
+        Source raster grid.
+    src_window : Window
+        Window defining the position of ``a`` in the source grid.
+        Must cover the target window's spatial support.
+    target : Grid
+        Target raster grid.
+    dst_window : Window
+        Window defining the output position in the target grid.
+
+    Returns
+    -------
+    np.ndarray
+        Area-averaged float32 array with shape
+        ``(dst_window.height, dst_window.width)``.
+        Pixels without source coverage remain zero.
+
+    """
+    dst = np.zeros(
+        (int(dst_window.height), int(dst_window.width)),
+        dtype=np.float32,
+    )
+
+    rio_reproject(
+        source=np.asarray(a, dtype=np.float32),
+        destination=dst,
+        src_transform=transform(src_window, source.transform),
+        src_crs=source.crs,
+        dst_transform=transform(dst_window, target.transform),
+        dst_crs=target.crs,
+        resampling=Resampling.average,
+        src_nodata=None,
+        dst_nodata=None,
+        num_threads=1,
+    )
+
+    return dst
+
+
+def resample_phasor_to_match(
+    cifg: np.ndarray,
+    valid: np.ndarray,
+    source: Grid,
+    src_window: Window,
+    target: Grid,
+    dst_window: Window,
+    min_valid_fraction: float = 1.0,
+    min_magnitude: float = 0.1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Resample wrapped phase onto a target window using complex averaging.
+
+    Normalize valid complex samples to unit phasors, area-average their
+    real and imaginary components, and divide by the valid-area fraction.
+    Reject pixels with insufficient valid support or excessive phase
+    cancellation, then normalize accepted averages to unit magnitude.
+
+    Parameters
+    ----------
+    cifg : np.ndarray
+        Two-dimensional complex interferogram corresponding to
+        ``src_window``. Original amplitudes are discarded.
+    valid : np.ndarray
+        Boolean source mask with the same shape as ``z``.
+        Nonfinite and zero-magnitude samples are also excluded.
+    source : Grid
+        Source interferogram grid.
+    src_window : Window
+        Window defining the position of ``z`` in the source grid.
+        Must cover the target support, including invalid padding
+        where the window extends beyond the source raster.
+    target : Grid
+        Target interferogram grid. Must have the same CRS as ``source``
+        and must not be finer in either axis.
+    dst_window : Window
+        Window defining the output position in the target grid.
+    min_valid_fraction : float, optional
+        Minimum area-weighted valid fraction required to accept an
+        output pixel. Default is 1.0, with a numerical tolerance of 1e-6.
+    min_magnitude : float, optional
+        Minimum magnitude of the mean phasor before final normalization.
+        Small values indicate phase cancellation. Default is 0.1.
+
+    Returns
+    -------
+    out : np.ndarray
+        Complex64 unit phasors on the target window.
+        Rejected pixels are zero; use ``good`` to identify valid output.
+    good : np.ndarray
+        Boolean mask identifying accepted output pixels.
+    support : np.ndarray
+        Float32 area-weighted valid fraction on the target window.
+
+    Raises
+    ------
+    ValueError
+        If the source and target grids do not support reduction.
+
+    """
+    check_reduction(source, target)
+
+    valid = valid & np.isfinite(cifg) & (np.abs(cifg) > 0)
+
+    unit = np.zeros(cifg.shape, dtype=np.complex64)
+    np.divide(cifg, np.abs(cifg), out=unit, where=valid)
+
+    support = average_to_window(valid, source, src_window, target, dst_window)
+
+    mean = average_to_window(
+        unit.real, source, src_window, target, dst_window
+    ) + 1j * average_to_window(unit.imag, source, src_window, target, dst_window)
+    mean /= np.maximum(support, 1e-12)
+
+    magnitude = np.abs(mean)
+    good = (support >= min_valid_fraction - 1e-6) & (magnitude >= min_magnitude)
+
+    out = np.zeros(mean.shape, dtype=np.complex64)
+    np.divide(mean, magnitude, out=out, where=good)
+
+    return out, good, support
 
 
 # ---------------------------------------------------------------------------

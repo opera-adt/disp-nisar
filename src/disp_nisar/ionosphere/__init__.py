@@ -34,6 +34,7 @@ from .gunw import (
     read_ionosphere_from_gunw,
 )
 from .inversion import build_design_matrix, invert_ifg_to_timeseries
+from .main_diff import BandInputs, estimate_iono_main_diff, run_main_diff_estimation
 from .mask import (
     apply_similarity_mask_and_fill,
     fill_gaps,
@@ -66,6 +67,9 @@ __all__ = [
     "run_ionosphere_estimation",
     "estimate_pair_ionosphere",
     "get_center_frequencies",
+    "BandInputs",
+    "estimate_iono_main_diff",
+    "run_main_diff_estimation",
     # Inversion
     "build_design_matrix",
     "invert_ifg_to_timeseries",
