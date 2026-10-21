@@ -32,6 +32,10 @@ from ._main_diff_io import (
 )
 from .gslc_mask import prepare_gslc_mask_cache
 from .inversion import build_design_matrix, invert_common_phase_block
+from .ionosphere_filter import (
+    FilterConfig,
+    filter_ionosphere_phase,
+)
 from .options import IonosphereOptions
 from .utils import (
     WORKING_TIFF_OPTIONS,
@@ -42,11 +46,6 @@ from .utils import (
     resample_phasor_to_match,
     source_window,
 )
-from .ionosphere_filter import (
-    FilterConfig,
-    filter_ionosphere_phase,
-)
-
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +63,7 @@ class BandInputs:
     similarity : Path
         Phase-similarity raster shared by the band. All inputs for this
         band must have identical dimensions, CRS, and affine transform.
+
     """
 
     interferograms: Sequence[Path]
@@ -88,6 +88,7 @@ def _date_pair(path: Path) -> tuple:
     ------
     ValueError
         If the filename does not contain two strictly increasing dates.
+
     """
     from opera_utils import get_dates
 
@@ -116,6 +117,7 @@ def _index(paths: Sequence[Path]) -> dict:
     ------
     ValueError
         If a filename has invalid dates or multiple files share a pair.
+
     """
     result: dict[tuple, Path] = {}
     for p in paths:
@@ -150,6 +152,7 @@ def estimate_iono_main_diff(
     ------
     ValueError
         If frequencies are invalid or indistinguishable, or shapes differ.
+
     """
     if not (np.isfinite(f_a) and np.isfinite(f_b) and min(f_a, f_b) > 0):
         raise ValueError("Center frequencies must be finite and positive")
@@ -177,6 +180,7 @@ def _same_grid(path, grid):
     ------
     ValueError
         If the raster grid differs from the expected grid.
+
     """
     if Grid.from_file(Path(path)) != grid:
         raise ValueError(f"Grid differs from the band's stitched IFG: {path}")
@@ -214,6 +218,7 @@ def _prepare_pair(inputs, masks, target, folder, options):
     quality; pixels outside the footprint receive zero complex values.
     Resume reuses existing outputs without checking whether inputs changed.
     Partial rasters are renamed only after every writer has closed.
+
     """
     method = options.method
     if method not in ("main_side", "main_diff"):
@@ -269,9 +274,7 @@ def _prepare_pair(inputs, masks, target, folder, options):
                 options=WORKING_TIFF_OPTIONS,
             )
 
-            writers[name] = stack.enter_context(
-                rasterio.open(temporary[name], "r+")
-            )
+            writers[name] = stack.enter_context(rasterio.open(temporary[name], "r+"))
 
         for block in io.iter_blocks(
             arr_shape=(target.height, target.width),
@@ -416,6 +419,7 @@ def _second_band(method):
     ------
     ValueError
         If the method is unsupported.
+
     """
     if method == "main_diff":
         return "D"
@@ -446,6 +450,7 @@ def _estimate_iono(method, f_a, f_b, phase_a, phase_second):
     ------
     ValueError
         If the method, frequencies, or input shapes are invalid.
+
     """
     _second_band(method)
 
@@ -502,9 +507,9 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
     The footprint controls where unwrapping is allowed; donor quality
     controls which observations are trusted during interpolation.
     Existing phase/component pairs are reused when resume is enabled.
+
     """
     from dolphin.unwrap import unwrap
-    from dolphin.unwrap._constants import CONNCOMP_SUFFIX
 
     ionosphere_method = options.method
     if ionosphere_method not in ("main_side", "main_diff"):
@@ -613,6 +618,7 @@ def _sample(path, reference):
     -------
     float
         Sample value, or NaN for a masked value.
+
     """
     with rasterio.open(path) as ds:
         return float(read_window(ds, Window(reference[1], reference[0], 1, 1))[0, 0])
@@ -660,6 +666,7 @@ def select_common_reference(
     Selection requires positive labels, but does not compare label IDs
     between different rasters. Inversion subsequently restricts each
     raster to the component containing this reference.
+
     """
     second = _second_band(method)
     bands = ("A", second)
@@ -779,6 +786,7 @@ def _invert_jobs(
     reference component. The earliest epoch is fixed at zero during
     inversion. Outputs contain frequency-A ionospheric phase in radians,
     with NaN nodata, on the B grid. No value is returned.
+
     """
     second = _second_band(method)
     bands = ("A", second)
@@ -821,9 +829,7 @@ def _invert_jobs(
                 options=WORKING_TIFF_OPTIONS,
             )
 
-            writers.append(
-                stack.enter_context(rasterio.open(path, "r+"))
-            )
+            writers.append(stack.enter_context(rasterio.open(path, "r+")))
 
         for dst in writers:
             dst.set_band_unit(1, "radians")
@@ -915,6 +921,7 @@ def _export_correction(source, match, output, f_a, reference_a, block_size, meth
     Subtract the warped reference phase, then convert once using
     -wavelength / (4*pi). The output has NaN nodata and meter units.
     This function writes the file and returns no value.
+
     """
     target = Grid.from_file(match)
     wavelength = freq_to_wavelength(f_a)
@@ -1011,7 +1018,10 @@ def _export_correction(source, match, output, f_a, reference_a, block_size, meth
 
             logger.error(
                 "REFERENCE CHECK: raw=%s; filtered=%s; A reference=%s; raw file=%s",
-                raw_ref, offset, reference_a, raw_path,
+                raw_ref,
+                offset,
+                reference_a,
+                raw_path,
             )
             raise ValueError(
                 "Product reference has no supported ionosphere estimate. "
@@ -1098,6 +1108,7 @@ def run_main_diff_estimation(
     -----
     The lock is released on exit, including exceptions. Existing nominal
     rasters and their reference metadata are not modified.
+
     """
     import fcntl
 
@@ -1170,6 +1181,7 @@ def _run_locked(
     invalidating the affected outputs and their dependent stages.
     Filtering uses the explicit FilterConfig values below; they are not
     derived from options.smooth_sigma_m.
+
     """
     method = options.method
     second = _second_band(method)
@@ -1281,13 +1293,12 @@ def _run_locked(
             f"{second}_unw": folder / f"{second}.unw.tif",
             "donor": folder / "donor.tif",
         }
-        missing = [
-            str(path) for path in ready.values()
-            if not path.is_file()
-        ]
+        missing = [str(path) for path in ready.values() if not path.is_file()]
         logger.info(
             "%s: resume=%s; missing cached files=%s",
-            name, options.resume, missing,
+            name,
+            options.resume,
+            missing,
         )
         if options.resume and all(p.is_file() for p in ready.values()):
             status = "reused"
@@ -1414,7 +1425,7 @@ def _run_locked(
                 phase_std=None,
                 config=FilterConfig(
                     sigma_m=(300.0, 300.0),  # trial widths in meters
-                    max_fill_m=600.0,       # meters
+                    max_fill_m=600.0,  # meters
                     min_support=0.10,
                     donor_erosion_px=(0, options.mask_erosion_px),
                     robust_passes=1,

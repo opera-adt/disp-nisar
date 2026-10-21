@@ -6,13 +6,14 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import numpy as np
 import rasterio
 from affine import Affine
-from rasterio.windows import Window
 from dolphin import io
+from rasterio.windows import Window
+
 ALGORITHM_VERSION = 1
 
 
@@ -26,7 +27,6 @@ class Grid:
     transform: Affine
 
     from dolphin import io
-
 
     @classmethod
     def from_file(cls, path: Path) -> Grid:
@@ -53,6 +53,7 @@ class Grid:
             crs=reader.crs,
             transform=reader.transform,
         )
+
     def record(self) -> dict:
         """Return JSON-compatible spatial metadata."""
         return {
@@ -168,5 +169,3 @@ def finish(folder: Path, signature: dict, outputs: dict[str, Path]) -> None:
             "stamps": {n: stamp(p) for n, p in outputs.items()},
         },
     )
-
-

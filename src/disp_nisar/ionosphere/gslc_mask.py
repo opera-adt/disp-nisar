@@ -8,14 +8,14 @@ import h5py
 import numpy as np
 import rasterio
 from affine import Affine
+from dolphin import io
 from rasterio.crs import CRS
 
 from ._main_diff_io import (
     Grid,
 )
-from dolphin import io
-
 from .utils import WORKING_TIFF_OPTIONS, check_reduction
+
 
 def _intervals(origin, step, dst_origin, dst_step, n):
     edges = (dst_origin + np.arange(n + 1) * dst_step - origin) / step

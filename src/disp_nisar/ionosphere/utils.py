@@ -306,31 +306,17 @@ def check_reduction(source: Grid, target: Grid) -> None:
     """
     for grid in (source, target):
         t = grid.transform
-        if (
-            grid.crs is None
-            or t.a <= 0
-            or t.e >= 0
-            or t.b != 0
-            or t.d != 0
-        ):
-            raise ValueError(
-                "Spatial reduction requires north-up georeferenced grids"
-            )
+        if grid.crs is None or t.a <= 0 or t.e >= 0 or t.b != 0 or t.d != 0:
+            raise ValueError("Spatial reduction requires north-up georeferenced grids")
 
     if source.crs != target.crs:
-        raise ValueError(
-            "Spatial reduction requires matching source/target CRS"
-        )
+        raise ValueError("Spatial reduction requires matching source/target CRS")
 
-    if (
-        target.transform.a < source.transform.a * (1 - 1e-8)
-        or abs(target.transform.e)
-        < abs(source.transform.e) * (1 - 1e-8)
-    ):
-        raise ValueError(
-            "Target must not be finer than source in either axis"
-        )
-    
+    if target.transform.a < source.transform.a * (1 - 1e-8) or abs(
+        target.transform.e
+    ) < abs(source.transform.e) * (1 - 1e-8):
+        raise ValueError("Target must not be finer than source in either axis")
+
 
 def source_window(
     source: Grid,
@@ -509,27 +495,21 @@ def resample_phasor_to_match(
     unit = np.zeros(cifg.shape, dtype=np.complex64)
     np.divide(cifg, np.abs(cifg), out=unit, where=valid)
 
-    support = average_to_window(
-        valid, source, src_window, target, dst_window
-    )
+    support = average_to_window(valid, source, src_window, target, dst_window)
 
     mean = average_to_window(
         unit.real, source, src_window, target, dst_window
-        ) + 1j * average_to_window(
-            unit.imag, source, src_window, target, dst_window
-        )
+    ) + 1j * average_to_window(unit.imag, source, src_window, target, dst_window)
     mean /= np.maximum(support, 1e-12)
 
     magnitude = np.abs(mean)
-    good = (
-        (support >= min_valid_fraction - 1e-6)
-        & (magnitude >= min_magnitude)
-    )
+    good = (support >= min_valid_fraction - 1e-6) & (magnitude >= min_magnitude)
 
     out = np.zeros(mean.shape, dtype=np.complex64)
     np.divide(mean, magnitude, out=out, where=good)
 
     return out, good, support
+
 
 # ---------------------------------------------------------------------------
 # GeoTIFF I/O  (backed by dolphin.io for consistency with the rest of the repo)
@@ -606,4 +586,3 @@ def read_reference_point(ref_point_file: str | Path) -> tuple[int, int]:
     """
     row, col = Path(ref_point_file).read_text().strip().split(",")
     return int(row), int(col)
-
