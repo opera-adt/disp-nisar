@@ -12,10 +12,10 @@ from rasterio.crs import CRS
 
 from ._main_diff_io import (
     Grid,
-    check_reduction,
-    windows,
 )
+from dolphin import io
 
+from .utils import WORKING_TIFF_OPTIONS, check_reduction
 
 def _intervals(origin, step, dst_origin, dst_step, n):
     edges = (dst_origin + np.arange(n + 1) * dst_step - origin) / step
@@ -126,9 +126,22 @@ def prepare_gslc_mask_cache(
         check_reduction(native, grid)
         ratio = abs(grid.transform.a / dx * grid.transform.e / dy)
         tile = max(1, min(tile_size, int(np.sqrt(work_mb * 1024**2 / (64 * ratio)))))
+        for path in temporary.values():
+            io.write_arr(
+                arr=None,
+                output_name=path,
+                shape=(grid.height, grid.width),
+                geotransform=grid.transform.to_gdal(),
+                projection=grid.crs.to_wkt(),
+                dtype="uint8",
+                nbands=1,
+                nodata=None,
+                options=WORKING_TIFF_OPTIONS,
+            )
+
         with (
-            rasterio.open(temporary["valid"], "w", **grid.profile("uint8")) as vd,
-            rasterio.open(temporary["inside"], "w", **grid.profile("uint8")) as fd,
+            rasterio.open(temporary["valid"], "r+") as vd,
+            rasterio.open(temporary["inside"], "r+") as fd,
         ):
             for win, valid, inside in reduce_gslc_mask(
                 g["mask"], native, grid, mode, tile

@@ -12,6 +12,7 @@ existing stitched IFGs; independent A/B displacement series are not mixed here.
 from __future__ import annotations
 
 import logging
+import shutil
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Sequence
 
 import numpy as np
 import rasterio
+from dolphin import io
 from rasterio.enums import Resampling
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
@@ -26,22 +28,43 @@ from rasterio.windows import Window
 from ._main_diff_io import (
     Grid,
     atomic_json,
-    check_reduction,
     read_window,
-    windows,
 )
 from .gslc_mask import prepare_gslc_mask_cache
 from .inversion import build_design_matrix, invert_common_phase_block
-from .mask import apply_similarity_mask_and_fill
 from .options import IonosphereOptions
-from .resampling import average_to_window, resample_phasor_to_match, source_window
+from .utils import (
+    WORKING_TIFF_OPTIONS,
+    average_to_window,
+    check_reduction,
+    freq_to_wavelength,
+    phase_to_disp,
+    resample_phasor_to_match,
+    source_window,
+)
+from .ionosphere_filter import (
+    FilterConfig,
+    filter_ionosphere_phase,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class BandInputs:
-    """Existing stitched Dolphin outputs for one frequency."""
+    """Stitched Dolphin outputs for one frequency band.
+
+    Attributes
+    ----------
+    interferograms : Sequence[Path]
+        Complex wrapped interferograms, indexed by acquisition pair.
+    correlations : Sequence[Path]
+        Correlation rasters for the same acquisition pairs.
+    similarity : Path
+        Phase-similarity raster shared by the band. All inputs for this
+        band must have identical dimensions, CRS, and affine transform.
+    """
 
     interferograms: Sequence[Path]
     correlations: Sequence[Path]
@@ -49,6 +72,23 @@ class BandInputs:
 
 
 def _date_pair(path: Path) -> tuple:
+    """Extract an ordered acquisition-date pair from a raster filename.
+
+    Parameters
+    ----------
+    path : Path
+        Filename containing exactly two acquisition dates.
+
+    Returns
+    -------
+    tuple[datetime, datetime]
+        Reference and secondary dates, normalized to midnight.
+
+    Raises
+    ------
+    ValueError
+        If the filename does not contain two strictly increasing dates.
+    """
     from opera_utils import get_dates
 
     dates = [
@@ -60,6 +100,23 @@ def _date_pair(path: Path) -> tuple:
 
 
 def _index(paths: Sequence[Path]) -> dict:
+    """Index acquisition-pair rasters by their normalized dates.
+
+    Parameters
+    ----------
+    paths : Sequence[Path]
+        Raster filenames containing reference and secondary dates.
+
+    Returns
+    -------
+    dict
+        Mapping from ordered date pairs to raster paths.
+
+    Raises
+    ------
+    ValueError
+        If a filename has invalid dates or multiple files share a pair.
+    """
     result: dict[tuple, Path] = {}
     for p in paths:
         pair = _date_pair(p)
@@ -72,21 +129,27 @@ def _index(paths: Sequence[Path]) -> dict:
 def estimate_iono_main_diff(
     f_a: float, f_b: float, phase_a: np.ndarray, phase_d: np.ndarray
 ) -> np.ndarray:
-    """Estimate ionospheric phase at frequency A from A and A-minus-B.
+    """Estimate frequency-A ionospheric phase from A and A-minus-B.
 
     Parameters
     ----------
     f_a, f_b : float
-        Distinct positive center frequencies in Hz.
+        Distinct positive center frequencies, in Hz.
     phase_a, phase_d : np.ndarray
-        Matched unwrapped phase or phase time series, in radians, sharing spatial
-        and temporal references, support, and phase convention.
+        Unwrapped phases or phase time series, in radians. Arrays must
+        have identical shapes, compatible spatial and temporal references,
+        and the same interferometric phase convention.
 
     Returns
     -------
     np.ndarray
-        Ionospheric phase at frequency A, in the input phase convention.
+        Frequency-A ionospheric phase as float32, with the input shape
+        and phase convention.
 
+    Raises
+    ------
+    ValueError
+        If frequencies are invalid or indistinguishable, or shapes differ.
     """
     if not (np.isfinite(f_a) and np.isfinite(f_b) and min(f_a, f_b) > 0):
         raise ValueError("Center frequencies must be finite and positive")
@@ -101,14 +164,56 @@ def estimate_iono_main_diff(
 
 
 def _same_grid(path, grid):
+    """Require a raster to match a supplied grid exactly.
+
+    Parameters
+    ----------
+    path : str or Path
+        Raster whose spatial metadata will be checked.
+    grid : Grid
+        Expected dimensions, CRS, and pixel-edge affine transform.
+
+    Raises
+    ------
+    ValueError
+        If the raster grid differs from the expected grid.
+    """
     if Grid.from_file(Path(path)) != grid:
         raise ValueError(f"Grid differs from the band's stitched IFG: {path}")
-def _prepare_pair(inputs, masks, target, folder, options):
-    """Prepare A/B or A/D interferograms using common donor support.
 
-    Both methods use the B grid and identical mask/quality checks.
-    Rejected pixels inside the footprint receive zero-phase placeholders
-    and zero quality; they are never marked as donors.
+
+def _prepare_pair(inputs, masks, target, folder, options):
+    """Prepare masked A/B or A/D observations on the frequency-B grid.
+
+    Parameters
+    ----------
+    inputs : dict[str, Path]
+        Paths for ifg_A, ifg_B, cor_A, cor_B, sim_A, and sim_B.
+    masks : dict[str, Path]
+        Date-specific valid and inside masks for both frequencies and
+        both pair endpoints, already reduced to their band IFG grids.
+    target : Grid
+        Frequency-B interferogram grid used for all prepared outputs.
+    folder : Path
+        Working directory for prepared rasters and partial writes.
+    options : IonosphereOptions
+        Method, quality thresholds, resampling support, block size,
+        and file-existence resume settings.
+
+    Returns
+    -------
+    dict[str, Path]
+        Prepared complex observations, correlation and similarity layers,
+        and common donor/inside masks. The second observation is B for
+        main_side and D = A * conjugate(B) for main_diff.
+
+    Notes
+    -----
+    A is resampled as unit phasors onto B. Both observations use identical
+    donor support. Interior non-donors receive unit placeholders with zero
+    quality; pixels outside the footprint receive zero complex values.
+    Resume reuses existing outputs without checking whether inputs changed.
+    Partial rasters are renamed only after every writer has closed.
     """
     method = options.method
     if method not in ("main_side", "main_diff"):
@@ -132,6 +237,11 @@ def _prepare_pair(inputs, masks, target, folder, options):
 
     folder.mkdir(parents=True, exist_ok=True)
     outputs = {name: folder / f"{name}.tif" for name in specs}
+    if options.resume and all(path.is_file() for path in outputs.values()):
+        return outputs
+    temporary = {
+        name: path.with_suffix(".partial.tif") for name, path in outputs.items()
+    }
 
     with ExitStack() as stack:
         readers = {
@@ -142,21 +252,33 @@ def _prepare_pair(inputs, masks, target, folder, options):
             name: stack.enter_context(rasterio.open(path))
             for name, path in masks.items()
         }
-        writers = {
-            name: stack.enter_context(
-                rasterio.open(
-                    outputs[name],
-                    "w",
-                    **target.profile(
-                        dtype,
-                        0 if name.endswith("_ifg") else None,
-                    ),
-                )
-            )
-            for name, dtype in specs.items()
-        }
+        writers = {}
 
-        for win in windows(target, options.block_size):
+        # Set spatial metadata explicitly so masks do not inherit nodata=0.
+        # Write partial files and publish them only after every block succeeds.
+        for name, dtype in specs.items():
+            io.write_arr(
+                arr=None,
+                output_name=temporary[name],
+                shape=(target.height, target.width),
+                geotransform=target.transform.to_gdal(),
+                projection=target.crs.to_wkt(),
+                dtype=dtype,
+                nbands=1,
+                nodata=0 if name.endswith("_ifg") else None,
+                options=WORKING_TIFF_OPTIONS,
+            )
+
+            writers[name] = stack.enter_context(
+                rasterio.open(temporary[name], "r+")
+            )
+
+        for block in io.iter_blocks(
+            arr_shape=(target.height, target.width),
+            block_shape=(options.block_size, options.block_size),
+        ):
+            rows, cols = block
+            win = Window.from_slices(rows, cols)
             sw = source_window(source, target, win)
 
             # Apply the same native-grid validity and quality rules to A/B.
@@ -167,24 +289,12 @@ def _prepare_pair(inputs, masks, target, folder, options):
                 sim = read_window(readers[f"sim_{band}"], window)
 
                 valid = (
-                    read_window(
-                        mask_readers[f"{band}_ref_valid"], window
-                    ) == 1
-                ) & (
-                    read_window(
-                        mask_readers[f"{band}_sec_valid"], window
-                    ) == 1
-                )
+                    read_window(mask_readers[f"{band}_ref_valid"], window) == 1
+                ) & (read_window(mask_readers[f"{band}_sec_valid"], window) == 1)
 
                 inside_band = (
-                    read_window(
-                        mask_readers[f"{band}_ref_inside"], window
-                    ) == 1
-                ) & (
-                    read_window(
-                        mask_readers[f"{band}_sec_inside"], window
-                    ) == 1
-                )
+                    read_window(mask_readers[f"{band}_ref_inside"], window) == 1
+                ) & (read_window(mask_readers[f"{band}_sec_inside"], window) == 1)
 
                 good = (
                     valid
@@ -222,20 +332,12 @@ def _prepare_pair(inputs, masks, target, folder, options):
 
             denominator = np.maximum(support, 1e-12)
 
-            qa = (
-                average_to_window(qa, source, sw, target, win)
-                / denominator
-            )
-            sa = (
-                average_to_window(sa, source, sw, target, win)
-                / denominator
-            )
+            qa = average_to_window(qa, source, sw, target, win) / denominator
+            sa = average_to_window(sa, source, sw, target, win) / denominator
             qa = np.clip(qa, 0, 1)
 
             # Footprint and donor support are distinct.
-            inside = (
-                average_to_window(ia, source, sw, target, win) > 0
-            ) & ib
+            inside = (average_to_window(ia, source, sw, target, win) > 0) & ib
 
             donor = (
                 inside
@@ -291,10 +393,30 @@ def _prepare_pair(inputs, masks, target, folder, options):
                     window=win,
                 )
 
+    # ExitStack has closed every writer before these files are published.
+    for name, path in temporary.items():
+        path.replace(outputs[name])
     return outputs
 
 
 def _second_band(method):
+    """Return the second observation label for an estimation method.
+
+    Parameters
+    ----------
+    method : str
+        Either main_diff or main_side.
+
+    Returns
+    -------
+    str
+        D for main_diff, or B for main_side.
+
+    Raises
+    ------
+    ValueError
+        If the method is unsupported.
+    """
     if method == "main_diff":
         return "D"
     if method == "main_side":
@@ -303,26 +425,41 @@ def _second_band(method):
 
 
 def _estimate_iono(method, f_a, f_b, phase_a, phase_second):
-    """Estimate ionospheric phase while preserving the input array shape."""
+    """Dispatch ionosphere estimation while preserving the input shape.
+
+    Parameters
+    ----------
+    method : str
+        Either main_diff or main_side.
+    f_a, f_b : float
+        Distinct positive center frequencies, in Hz.
+    phase_a, phase_second : np.ndarray
+        Matching referenced phase arrays, in radians. The second array
+        contains A-minus-B for main_diff or B for main_side.
+
+    Returns
+    -------
+    np.ndarray
+        Frequency-A ionospheric phase with the original array shape.
+
+    Raises
+    ------
+    ValueError
+        If the method, frequencies, or input shapes are invalid.
+    """
     _second_band(method)
 
     if phase_a.shape != phase_second.shape:
         raise ValueError("Input phase arrays must have matching shapes")
 
-    if not (
-        np.isfinite(f_a)
-        and np.isfinite(f_b)
-        and min(f_a, f_b) > 0
-    ):
+    if not (np.isfinite(f_a) and np.isfinite(f_b) and min(f_a, f_b) > 0):
         raise ValueError("Center frequencies must be finite and positive")
 
     if abs(f_a - f_b) <= 1e-8 * max(f_a, f_b):
         raise ValueError("Center frequencies are indistinguishable")
 
     if method == "main_diff":
-        return estimate_iono_main_diff(
-            f_a, f_b, phase_a, phase_second
-        )
+        return estimate_iono_main_diff(f_a, f_b, phase_a, phase_second)
 
     from .gslc import estimate_iono_main_side
 
@@ -339,19 +476,47 @@ def _estimate_iono(method, f_a, f_b, phase_a, phase_second):
 
 
 def _unwrap_pair(prepared, folder, unwrap_options, options):
+    """Unwrap both prepared observations and retain original donor support.
+
+    Parameters
+    ----------
+    prepared : dict[str, Path]
+        Outputs from _prepare_pair, including observation quality layers,
+        the footprint mask, and the original donor mask.
+    folder : Path
+        Pair working directory for unwrapped phase and component rasters.
+    unwrap_options : dolphin.workflows.config.UnwrapOptions
+        Base configuration for SNAPHU or Whirlwind.
+    options : IonosphereOptions
+        Method, effective looks, interpolation thresholds, resume behavior,
+        and intermediate-file retention settings.
+
+    Returns
+    -------
+    dict[str, Path]
+        Unwrapped phase and component paths for both observations, plus
+        the donor mask. Prepared inputs remain only when requested.
+
+    Notes
+    -----
+    The footprint controls where unwrapping is allowed; donor quality
+    controls which observations are trusted during interpolation.
+    Existing phase/component pairs are reused when resume is enabled.
+    """
     from dolphin.unwrap import unwrap
+    from dolphin.unwrap._constants import CONNCOMP_SUFFIX
 
     ionosphere_method = options.method
     if ionosphere_method not in ("main_side", "main_diff"):
-        raise ValueError(
-            f"Unsupported ionosphere method: {ionosphere_method!r}"
-        )
+        raise ValueError(f"Unsupported ionosphere method: {ionosphere_method!r}")
 
     second = "D" if ionosphere_method == "main_diff" else "B"
     bands = ("A", second)
 
     unwrap_method = getattr(
-        unwrap_options.unwrap_method, "value", unwrap_options.unwrap_method,
+        unwrap_options.unwrap_method,
+        "value",
+        unwrap_options.unwrap_method,
     )
     if unwrap_method not in ("snaphu", "whirlwind"):
         raise ValueError(
@@ -362,26 +527,22 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
     # Validate all inputs before starting either unwrap.
     required = {"inside", "donor"}
     required.update(
-        f"{band}_{kind}"
-        for band in bands
-        for kind in ("ifg", "cor", "sim")
+        f"{band}_{kind}" for band in bands for kind in ("ifg", "cor", "sim")
     )
     missing = required.difference(prepared)
     if missing:
         raise ValueError(
-            f"Missing prepared inputs for {ionosphere_method}: "
-            f"{sorted(missing)}"
+            f"Missing prepared inputs for {ionosphere_method}: {sorted(missing)}"
         )
-
 
     result = dict(prepared)
 
     for band in bands:
+        unw_path = folder / f"{band}.unw.tif"
+        if options.resume and unw_path.is_file():
+            result[f"{band}_unw"] = unw_path
+            continue
         cfg = unwrap_options.model_copy(deep=True)
-
-        if unwrap_method == "whirlwind":
-            # Interpolate through Dolphin preprocessing only.
-            cfg.whirlwind_options.interpolate = False
 
         cfg.run_unwrap = True
         cfg.run_interpolation = True
@@ -396,23 +557,36 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
         cfg.preprocess_options.interpolation_similarity_threshold = (
             options.similarity_threshold
         )
+        if unwrap_method == "whirlwind" and hasattr(cfg, "whirlwind_options"):
+            # Recent Dolphin routes interpolation through Whirlwind itself.
+            # Similarity has already been enforced in the prepared donor mask;
+            # non-donors have zero correlation in both prepared observations.
+            cfg.whirlwind_options.interpolate = True
+            cfg.whirlwind_options.interp_cutoff = (
+                cfg.preprocess_options.interpolation_cor_threshold
+            )
 
-        unw, cc = unwrap(
+        work = folder / f"_unwrap_{band}"
+        work.mkdir(exist_ok=True)
+
+        unw, _ = unwrap(
             ifg_filename=prepared[f"{band}_ifg"],
             corr_filename=prepared[f"{band}_cor"],
-            unw_filename=folder / f"{band}.unw.tif",
+            unw_filename=work / f"{band}.unw.tif",
             nlooks=options.nlooks,
             mask_filename=prepared["inside"],
             similarity_filename=prepared[f"{band}_sim"],
             unwrap_options=cfg,
             unw_nodata=np.nan,
             ccl_nodata=0,
-            scratchdir=folder / f"scratch_{band}",
+            scratchdir=work / "scratch",
             delete_scratch=not options.keep_intermediates,
         )
 
-        result[f"{band}_unw"] = Path(unw)
-        result[f"{band}_cc"] = Path(cc)
+        Path(unw).replace(unw_path)
+        result[f"{band}_unw"] = unw_path
+        if not options.keep_intermediates:
+            shutil.rmtree(work)
 
     # Preserve the original donor mask for reference selection/inversion.
     # Clean prepared files only after both unwrap operations succeed.
@@ -424,7 +598,22 @@ def _unwrap_pair(prepared, folder, unwrap_options, options):
 
     return result
 
+
 def _sample(path, reference):
+    """Read a single raster value at a row-column reference.
+
+    Parameters
+    ----------
+    path : str or Path
+        Raster to sample.
+    reference : tuple[int, int]
+        Zero-based row and column indices.
+
+    Returns
+    -------
+    float
+        Sample value, or NaN for a masked value.
+    """
     with rasterio.open(path) as ds:
         return float(read_window(ds, Window(reference[1], reference[0], 1, 1))[0, 0])
 
@@ -437,18 +626,73 @@ def select_common_reference(
     block_size: int,
     method: str,
 ) -> tuple[int, int]:
-    """Choose a common donor after all A/D unwrapping, writing candidates on disk.
+    """Choose a supported reference shared by every observation pair.
 
-    Require original donors with finite A/D phase in every pair.
-    Connected-component labels are not used. Avoid a full-frame distance transform.
+    Parameters
+    ----------
+    jobs : list[dict[str, Path]]
+        Pair outputs containing donor masks, unwrapped phases, and
+        connected-component labels for both observations.
+    grid : Grid
+        Common frequency-B grid.
+    origin : tuple[int, int]
+        Preferred reference row and column on the B grid.
+    output : Path
+        Destination for the binary common-candidate raster.
+    block_size : int
+        Maximum block height and width, in pixels.
+    method : str
+        Either main_diff or main_side.
+
+    Returns
+    -------
+    tuple[int, int]
+        Candidate row and column nearest to origin in pixel-index space.
+
+    Raises
+    ------
+    ValueError
+        If no donor has finite phase and positive component labels for
+        both observations in every pair.
+
+    Notes
+    -----
+    Selection requires positive labels, but does not compare label IDs
+    between different rasters. Inversion subsequently restricts each
+    raster to the component containing this reference.
     """
     second = _second_band(method)
     bands = ("A", second)
-    with rasterio.open(output, "w", **grid.profile("uint8")) as ds:
-        for win in windows(grid, block_size):
+
+    io.write_arr(
+        arr=None,
+        output_name=output,
+        shape=(grid.height, grid.width),
+        geotransform=grid.transform.to_gdal(),
+        projection=grid.crs.to_wkt(),
+        dtype="uint8",
+        nbands=1,
+        nodata=None,
+        options=WORKING_TIFF_OPTIONS,
+    )
+
+    # Start with all pixels eligible, then intersect support across all pairs.
+    with rasterio.open(output, "r+") as ds:
+        for block in io.iter_blocks(
+            arr_shape=(grid.height, grid.width),
+            block_shape=(block_size, block_size),
+        ):
+            rows, cols = block
+            win = Window.from_slices(rows, cols)
             ds.write(
-                np.ones((int(win.height), int(win.width)), np.uint8), 1, window=win
+                np.ones(
+                    (int(win.height), int(win.width)),
+                    dtype=np.uint8,
+                ),
+                1,
+                window=win,
             )
+
     for job in jobs:
         with ExitStack() as stack:
             ds = stack.enter_context(rasterio.open(output, "r+"))
@@ -456,7 +700,12 @@ def select_common_reference(
                 n: stack.enter_context(rasterio.open(job[n]))
                 for n in ("donor", "A_unw", f"{second}_unw")
             }
-            for win in windows(grid, block_size):
+            for block in io.iter_blocks(
+                arr_shape=(grid.height, grid.width),
+                block_shape=(block_size, block_size),
+            ):
+                rows, cols = block
+                win = Window.from_slices(rows, cols)
                 good = (ds.read(1, window=win) > 0) & (
                     read_window(readers["donor"], win) == 1
                 )
@@ -466,7 +715,12 @@ def select_common_reference(
                 ds.write(good.astype(np.uint8), 1, window=win)
     best = None
     with rasterio.open(output) as ds:
-        for win in windows(grid, block_size):
+        for block in io.iter_blocks(
+            arr_shape=(grid.height, grid.width),
+            block_shape=(block_size, block_size),
+        ):
+            rows, cols = block
+            win = Window.from_slices(rows, cols)
             rr, cc = np.nonzero(ds.read(1, window=win))
             if not len(rr):
                 continue
@@ -479,8 +733,7 @@ def select_common_reference(
     if best is None:
         raise ValueError(
             f"No common A/{second} reference survives donor and "
-            "finite-phase checks; completed unwraps are retained"
-
+            "finite-phase/component checks; completed unwraps are retained"
         )
     return best[1], best[2]
 
@@ -497,6 +750,36 @@ def _invert_jobs(
     block_size,
     method,
 ):
+    """Invert referenced pair phases and write ionosphere date-pair rasters.
+
+    Parameters
+    ----------
+    jobs : list[dict[str, Path]]
+        Donor, unwrapped-phase, and component rasters in pairs order.
+    pairs : sequence[tuple]
+        Ordered acquisition-date pairs defining the observation network.
+    grid : Grid
+        Common frequency-B grid for block processing.
+    reference : tuple[int, int]
+        Common reference row and column on the B grid.
+    f_a, f_b : float
+        Center frequencies, in Hz.
+    outputs : sequence[Path]
+        Output paths, ordered like output_pairs.
+    output_pairs : sequence[tuple]
+        Requested reference/secondary epoch pairs.
+    block_size : int
+        Maximum block height and width, in pixels.
+    method : str
+        Either main_diff or main_side.
+
+    Notes
+    -----
+    Each observation is spatially referenced and restricted to its
+    reference component. The earliest epoch is fixed at zero during
+    inversion. Outputs contain frequency-A ionospheric phase in radians,
+    with NaN nodata, on the B grid. No value is returned.
+    """
     second = _second_band(method)
     bands = ("A", second)
 
@@ -508,9 +791,7 @@ def _invert_jobs(
         raise ValueError(f"A/{second} network is disconnected")
 
     offsets = {
-        band: np.array(
-            [_sample(job[f"{band}_unw"], reference) for job in jobs]
-        )
+        band: np.array([_sample(job[f"{band}_unw"], reference) for job in jobs])
         for band in bands
     }
 
@@ -518,22 +799,31 @@ def _invert_jobs(
         raise ValueError("Reference phase is not finite for every pair")
 
     with ExitStack() as stack:
-        readers = [
-            {
-                name: stack.enter_context(rasterio.open(job[name]))
-                for name in ("donor", "A_unw", f"{second}_unw")
-            }
-            for job in jobs
-        ]
+        # These reads are inside the B grid, so Dolphin's slice reader suffices.
+        # Open on demand instead of holding five handles per pair for the full run.
+        readers = {
+            name: [
+                io.RasterReader.from_file(job[name], keep_open=False) for job in jobs
+            ]
+            for name in ("donor", "A_unw", f"{second}_unw")
+        }
 
-        writers = [
-            stack.enter_context(
-                rasterio.open(
-                    path, "w", **grid.profile("float32", np.nan)
-                )
+        writers = []
+
+        for path in outputs:
+            io.write_arr(
+                arr=None,
+                output_name=path,
+                like_filename=jobs[0]["A_unw"],
+                dtype="float32",
+                nbands=1,
+                nodata=np.nan,
+                options=WORKING_TIFF_OPTIONS,
             )
-            for path in outputs
-        ]
+
+            writers.append(
+                stack.enter_context(rasterio.open(path, "r+"))
+            )
 
         for dst in writers:
             dst.set_band_unit(1, "radians")
@@ -542,17 +832,28 @@ def _invert_jobs(
                 ionosphere_method=method,
             )
 
-        for win in windows(grid, block_size):
-            valid = np.stack(
-                [read_window(reader["donor"], win) == 1
-                 for reader in readers]
+        for block in io.iter_blocks(
+            arr_shape=(grid.height, grid.width),
+            block_shape=(block_size, block_size),
+        ):
+            rows, cols = block
+            win = Window.from_slices(rows, cols)
+            rows, cols = win.toslices()
+            valid = (
+                np.ma.stack([reader[rows, cols] for reader in readers["donor"]]).filled(
+                    0
+                )
+                == 1
             )
 
             phases = {}
             for band in bands:
-                phases[band] = np.stack(
-                    [read_window(reader[f"{band}_unw"], win)
-                     for reader in readers]
+                phases[band] = (
+                    np.ma.stack(
+                        [reader[rows, cols] for reader in readers[f"{band}_unw"]]
+                    )
+                    .astype(np.float32)
+                    .filled(np.nan)
                 )
                 phases[band] -= offsets[band][:, None, None]
 
@@ -563,19 +864,17 @@ def _invert_jobs(
                 valid,
             )
 
-            iono = _estimate_iono(
-                method, f_a, f_b, phase_a, phase_second
-            )
+            iono = _estimate_iono(method, f_a, f_b, phase_a, phase_second)
 
-            zero = np.where(
-                np.isfinite(iono).all(axis=0), 0, np.nan
-            )[None].astype(np.float32)
+            # The inversion omits the earliest epoch, whose phase is fixed at zero.
+            # Restore it before differencing arbitrary requested epoch pairs.
+            zero = np.where(np.isfinite(iono).all(axis=0), 0, np.nan)[None].astype(
+                np.float32
+            )
 
             series = np.concatenate((zero, iono), axis=0)
 
-            for dst, (ref, sec) in zip(
-                writers, output_pairs, strict=True
-            ):
+            for dst, (ref, sec) in zip(writers, output_pairs, strict=True):
                 dst.write(
                     series[idx[sec]] - series[idx[ref]],
                     1,
@@ -583,13 +882,42 @@ def _invert_jobs(
                 )
 
 
-def _export_correction(
-    source, match, output, f_a, reference_a, block_size, method
-):
+def _export_correction(source, match, output, f_a, reference_a, block_size, method):
     # Same matrix/sign as Dolphin inversion; convert raw phase by -lambda/(4*pi)
     # exactly once. The A-B phase has no independent wavelength.
+    """Export a re-referenced ionosphere correction in meters.
+
+    Parameters
+    ----------
+    source : str or Path
+        Filled ionospheric phase raster in radians on the B grid.
+    match : str or Path
+        Nominal displacement raster defining the output grid.
+    output : str or Path
+        Destination correction raster, typically a partial filename.
+    f_a : float
+        Frequency-A center frequency, in Hz.
+    reference_a : tuple[int, int]
+        Nominal reference row and column on the output grid.
+    block_size : int
+        Maximum block height and width, in pixels.
+    method : str
+        Estimation method recorded in output metadata.
+
+    Raises
+    ------
+    ValueError
+        If the nominal reference has no finite warped estimate.
+
+    Notes
+    -----
+    Bilinear resampling operates on unwrapped ionospheric phase.
+    Subtract the warped reference phase, then convert once using
+    -wavelength / (4*pi). The output has NaN nodata and meter units.
+    This function writes the file and returns no value.
+    """
     target = Grid.from_file(match)
-    factor = -299792458.0 / f_a / (4 * np.pi)
+    wavelength = freq_to_wavelength(f_a)
     with (
         rasterio.open(source) as src,
         WarpedVRT(
@@ -620,10 +948,7 @@ def _export_correction(
                 x, y = xs[0], ys[0]
 
             row_b, col_b = src.index(x, y)
-            in_bounds = (
-                0 <= row_b < src.height
-                and 0 <= col_b < src.width
-            )
+            in_bounds = 0 <= row_b < src.height and 0 <= col_b < src.width
 
             logger.error(
                 "Unsupported reference: source=%s, match=%s, "
@@ -645,11 +970,15 @@ def _export_correction(
                 c0 = max(0, col_b - 2)
                 c1 = min(src.width, col_b + 3)
 
-                patch = src.read(
-                    1,
-                    window=Window(c0, r0, c1 - c0, r1 - r0),
-                    masked=True,
-                ).astype(np.float64).filled(np.nan)
+                patch = (
+                    src.read(
+                        1,
+                        window=Window(c0, r0, c1 - c0, r1 - r0),
+                        masked=True,
+                    )
+                    .astype(np.float64)
+                    .filled(np.nan)
+                )
 
                 logger.error(
                     "Source nodata=%s; source reference value=%s; "
@@ -658,21 +987,63 @@ def _export_correction(
                     patch[row_b - r0, col_b - c0],
                     np.array2string(patch, precision=5),
                 )
+            raw_path = Path(source).with_name(
+                Path(source).name.replace("_filled.rad.tif", ".rad.tif")
+            )
 
+            with rasterio.open(raw_path) as raw_ds:
+                with WarpedVRT(
+                    raw_ds,
+                    crs=target.crs,
+                    transform=target.transform,
+                    width=target.width,
+                    height=target.height,
+                    resampling=Resampling.bilinear,
+                    nodata=np.nan,
+                    dtype="float32",
+                ) as raw_vrt:
+                    raw_ref = float(
+                        read_window(
+                            raw_vrt,
+                            Window(reference_a[1], reference_a[0], 1, 1),
+                        )[0, 0]
+                    )
+
+            logger.error(
+                "REFERENCE CHECK: raw=%s; filtered=%s; A reference=%s; raw file=%s",
+                raw_ref, offset, reference_a, raw_path,
+            )
             raise ValueError(
                 "Product reference has no supported ionosphere estimate. "
                 "See source/reference diagnostics above; existing unwraps are retained."
             )
-        with rasterio.open(output, "w", **target.profile("float32", np.nan)) as dst:
+        # Export on the nominal product grid, which may differ from the B grid.
+        io.write_arr(
+            arr=None,
+            output_name=output,
+            like_filename=match,
+            dtype="float32",
+            nbands=1,
+            nodata=np.nan,
+            options=WORKING_TIFF_OPTIONS,
+        )
+        with rasterio.open(output, "r+") as dst:
             dst.set_band_unit(1, "meters")
             dst.update_tags(
                 ionosphere_method=method,
                 reference_row=reference_a[0],
                 reference_col=reference_a[1],
             )
-            for win in windows(target, block_size):
+            for block in io.iter_blocks(
+                arr_shape=(target.height, target.width),
+                block_shape=(block_size, block_size),
+            ):
+                rows, cols = block
+                win = Window.from_slices(rows, cols)
                 dst.write(
-                    ((read_window(vrt, win) - offset) * factor).astype(np.float32),
+                    phase_to_disp(read_window(vrt, win) - offset, wavelength).astype(
+                        np.float32
+                    ),
                     1,
                     window=win,
                 )
@@ -691,33 +1062,42 @@ def run_main_diff_estimation(
     unwrap_options,
     options: IonosphereOptions,
 ) -> list[Path]:
-    """Prepare, unwrap, reference, invert, and export A/(A-B) corrections.
+    """Run A/B or A/(A-B) ionosphere processing under an output lock.
 
     Parameters
     ----------
     band_a, band_b : BandInputs
-        Full matching stitched IFG networks on their respective native grids.
+        Matching stitched IFG networks on their respective band grids.
     gslc_by_date : dict
-        Acquisition datetime (midnight) to the actual local raw GSLC used in PL.
-    output_timeseries_paths : sequence[Path]
-        Nominal products whose date pairs, output order and grids must be matched.
+        Acquisition dates normalized to midnight, mapped to local raw
+        GSLC inputs used for phase linking.
+    output_timeseries_paths : Sequence[Path]
+        Nominal displacement rasters defining requested pairs and grids.
     reference_a : tuple[int, int]
-        Existing nominal A spatial reference on its product grid.
+        Nominal reference row and column on the product grid.
     f_a, f_b : float
-        Constant center frequencies in Hz; caller checks acquisition consistency.
+        Constant center frequencies, in Hz.
     out_dir : Path
-        Stable mask/pair/inversion cache directory.
+        Directory for masks, pair products, inversion, and corrections.
     unwrap_options : dolphin.workflows.config.UnwrapOptions
-        SNAPHU settings, with interpolation enabled and explicit donor thresholds.
+        Base SNAPHU or Whirlwind configuration.
     options : IonosphereOptions
-        DISP-specific donor, memory and restart options.
+        Estimation, quality, memory, resume, and retention settings.
 
     Returns
     -------
     list[Path]
-        Correction rasters in meters, ordered like output_timeseries_paths.
-        Original nominal data and their reference metadata are not modified.
+        Correction rasters in meters, ordered like the nominal products.
 
+    Raises
+    ------
+    RuntimeError
+        If another process already holds the output-directory lock.
+
+    Notes
+    -----
+    The lock is released on exit, including exceptions. Existing nominal
+    rasters and their reference metadata are not modified.
     """
     import fcntl
 
@@ -756,6 +1136,41 @@ def _run_locked(
     unwrap_options,
     options,
 ):
+    """Process a matching A/B network while the caller holds the lock.
+
+    Parameters
+    ----------
+    band_a, band_b : BandInputs
+        Stitched wrapped phase, correlation, and similarity inputs.
+    gslc_by_date : dict
+        Normalized acquisition dates mapped to raw GSLC paths.
+    products : Sequence[Path]
+        Nominal rasters defining requested output pairs and grids.
+    reference_a : tuple[int, int]
+        Nominal product reference row and column.
+    f_a, f_b : float
+        Constant center frequencies, in Hz.
+    out_dir : Path
+        Resolved output-directory path.
+    unwrap_options : dolphin.workflows.config.UnwrapOptions
+        Base configuration for pair unwrapping.
+    options : IonosphereOptions
+        Method, quality thresholds, memory limits, and restart settings.
+
+    Returns
+    -------
+    list[Path]
+        Exported meter-valued ionosphere corrections in product order.
+
+    Notes
+    -----
+    Stages are mask caching, pair preparation/unwrapping, common-reference
+    selection, network inversion, filtering/filling, and product export.
+    Resume relies on file existence: changed inputs or settings require
+    invalidating the affected outputs and their dependent stages.
+    Filtering uses the explicit FilterConfig values below; they are not
+    derived from options.smooth_sigma_m.
+    """
     method = options.method
     second = _second_band(method)
     if not products:
@@ -772,7 +1187,9 @@ def _run_locked(
         logger.info("Reusing all existing ionosphere corrections")
         return final_paths
     _estimate_iono(
-        method, f_a, f_b,
+        method,
+        f_a,
+        f_b,
         np.zeros((1, 1)),
         np.zeros((1, 1)),
     )
@@ -864,17 +1281,22 @@ def _run_locked(
             f"{second}_unw": folder / f"{second}.unw.tif",
             "donor": folder / "donor.tif",
         }
-
+        missing = [
+            str(path) for path in ready.values()
+            if not path.is_file()
+        ]
+        logger.info(
+            "%s: resume=%s; missing cached files=%s",
+            name, options.resume, missing,
+        )
         if options.resume and all(p.is_file() for p in ready.values()):
             status = "reused"
         else:
             # One fixed working directory, not a new attempt directory each time.
-            import shutil
-
             work = folder / "_partial"
-            if work.exists():
+            if work.exists() and not options.resume:
                 shutil.rmtree(work)
-            work.mkdir()
+            work.mkdir(exist_ok=True)
 
             generated = _unwrap_pair(
                 _prepare_pair(inputs, masks, target, work, options),
@@ -910,16 +1332,6 @@ def _run_locked(
     dx_m = dx * meters_per_unit
     dy_m = dy * meters_per_unit
 
-    fill_settings = {
-        "fill_method": "gdal",
-        "max_search_dist": 500,  # Gap-fill search distance in pixels.
-        "smooth_sigma": (
-            options.smooth_sigma_m / dy_m,
-            options.smooth_sigma_m / dx_m,
-        ),
-        "mask_erosion_px": options.mask_erosion_px,
-    }
-
     timeseries_dir = out_dir / "timeseries"
     correction_dir = out_dir / "corrections"
     timeseries_dir.mkdir(parents=True, exist_ok=True)
@@ -931,16 +1343,12 @@ def _run_locked(
         logger.info("Reusing existing ionosphere inversion results")
     else:
         reference = select_common_reference(
-<<<<<<< HEAD
-            jobs, target, origin, timeseries_dir / "common_candidates.tif",
-            options.block_size,  method=method,
-=======
             jobs,
             target,
             origin,
             timeseries_dir / "common_candidates.tif",
             options.block_size,
->>>>>>> origin/ionosphere_main_diff_initial
+            method=method,
         )
         atomic_json(
             timeseries_dir / "reference.json",
@@ -957,10 +1365,7 @@ def _run_locked(
             temporary,
             output_pairs,
             options.block_size,
-<<<<<<< HEAD
             method=method,
-=======
->>>>>>> origin/ionosphere_main_diff_initial
         )
         for source, destination in zip(temporary, intermediate, strict=True):
             source.replace(destination)
@@ -998,65 +1403,24 @@ def _run_locked(
                         ) as mask_vrt:
                             inside = mask_vrt.read(1, masked=True).filled(0)
                     footprint &= inside > 0
-            # trusted = footprint & np.isfinite(iono)
-            # if not trusted.any():
-            #     raise ValueError(f"{name}: no valid ionosphere samples for filling")
-
-            # # Existing helper erodes invalid stripes along columns. Check donors
-            # # before calling it: a Gaussian fill with no donors is undefined.
-            # from scipy.ndimage import maximum_filter1d
-
-            # radius = fill_settings["mask_erosion_px"]
-            # eroded_donors = footprint & ~maximum_filter1d(
-            #     (~trusted).astype(np.uint8), size=2 * radius + 1, axis=1,
-            # ).astype(bool)
-            # if not eroded_donors.any():
-            #     raise ValueError(f"{name}: no donors remain after mask erosion")
-
-            # iono_filled, quality_mask = apply_similarity_mask_and_fill(
-            #     iono=iono, sim_mask=trusted, existing_mask=footprint,
-            #     **fill_settings,
-            # )
-            from .utils import smooth_iono
-
             trusted = footprint & np.isfinite(iono)
-
-            if not trusted.any():
-                raise ValueError(f"{name}: no valid ionosphere samples for smoothing")
-
-            # origin is the nominal A reference mapped onto the B grid.
-            rr, cc = origin
-
-            logger.warning(
-                "%s reference before smoothing: footprint=%s, trusted=%s, raw=%s",
-                name,
-                bool(footprint[rr, cc]),
-                bool(trusted[rr, cc]),
-                float(iono[rr, cc]),
+            # Preserve the supplied filtering behavior and trial parameters.
+            # The footprint limits output extent; trusted pixels supply donors.
+            result = filter_ionosphere_phase(
+                iono,
+                donor_mask=trusted,
+                footprint=footprint,
+                pixel_size_m=(dy_m, dx_m),
+                phase_std=None,
+                config=FilterConfig(
+                    sigma_m=(300.0, 300.0),  # trial widths in meters
+                    max_fill_m=600.0,       # meters
+                    min_support=0.10,
+                    donor_erosion_px=(0, options.mask_erosion_px),
+                    robust_passes=1,
+                ),
             )
-
-            iono_filled = smooth_iono(
-                arr=iono,
-                sigma=fill_settings["smooth_sigma"],
-                mask=trusted,
-                restore_mask=False,
-            )
-
-            logger.warning(
-                "%s reference after smoothing, before footprint: %s",
-                name,
-                float(iono_filled[rr, cc]),
-            )
-
-            iono_filled[~footprint] = np.nan
-            quality_mask = trusted
-
-            logger.warning(
-                "%s reference after footprint: %s",
-                name,
-                float(iono_filled[rr, cc]),
-
-            )
+            iono_filled = result.phase
             logger.info(
                 "%s: ionosphere valid before=%d, after=%d",
                 name,
@@ -1064,13 +1428,18 @@ def _run_locked(
                 np.count_nonzero(np.isfinite(iono_filled)),
             )
             temporary_filled = filled_path.with_name(f"{filled_path.stem}.partial.tif")
-            with rasterio.open(
-                temporary_filled,
-                "w",
-                **target.profile("float32", np.nan),
-            ) as dst:
-                dst.write(iono_filled.astype(np.float32), 1)
-                dst.set_band_unit(1, "radians")
+            # The raw ionosphere is already on the B grid; use it as the template.
+            io.write_arr(
+                arr=iono_filled.astype(np.float32),
+                output_name=temporary_filled,
+                like_filename=src,
+                dtype="float32",
+                nbands=1,
+                nodata=np.nan,
+                units="radians",
+                options=WORKING_TIFF_OPTIONS,
+            )
+            with rasterio.open(temporary_filled, "r+") as dst:
                 dst.update_tags(
                     ionosphere_method=method,
                     phase_convention="dolphin_ifg_ref_times_conj_sec",

@@ -12,7 +12,7 @@ import numpy as np
 import rasterio
 from affine import Affine
 from rasterio.windows import Window
-
+from dolphin import io
 ALGORITHM_VERSION = 1
 
 
@@ -25,12 +25,34 @@ class Grid:
     crs: Any
     transform: Affine
 
+    from dolphin import io
+
+
     @classmethod
     def from_file(cls, path: Path) -> Grid:
-        """Read spatial metadata without loading pixels."""
-        with rasterio.open(path) as ds:
-            return cls(ds.height, ds.width, ds.crs, ds.transform)
+        """Read raster grid metadata using Dolphin.
 
+        Parameters
+        ----------
+        path : Path
+            Input raster readable by Dolphin's RasterReader.
+
+        Returns
+        -------
+        Grid
+            Raster dimensions, coordinate reference system, and
+            pixel-edge affine transform.
+
+        """
+        reader = io.RasterReader.from_file(path, keep_open=False)
+        height, width = reader.shape
+
+        return cls(
+            height=height,
+            width=width,
+            crs=reader.crs,
+            transform=reader.transform,
+        )
     def record(self) -> dict:
         """Return JSON-compatible spatial metadata."""
         return {
@@ -58,12 +80,25 @@ class Grid:
             "BIGTIFF": "IF_SAFER",
         }
 
-
-def windows(grid: Grid, size: int) -> Iterator[Window]:
-    """Iterate bounded windows in row-major order."""
-    for r in range(0, grid.height, size):
-        for c in range(0, grid.width, size):
-            yield Window(c, r, min(size, grid.width - c), min(size, grid.height - r))
+    def create_raster(self, path: Path, dtype: str, nodata=None):
+        """Create a working raster with Dolphin, then open it for block writes."""
+        io.write_arr(
+            arr=None,
+            output_name=path,
+            shape=(self.height, self.width),
+            dtype=dtype,
+            geotransform=self.transform.to_gdal(),
+            projection=self.crs,
+            nodata=nodata,
+            options=[
+                "TILED=YES",
+                "BLOCKXSIZE=256",
+                "BLOCKYSIZE=256",
+                "COMPRESS=LZW",
+                "BIGTIFF=IF_SAFER",
+            ],
+        )
+        return rasterio.open(path, "r+")
 
 
 def read_window(ds, window: Window) -> np.ndarray:
@@ -135,15 +170,3 @@ def finish(folder: Path, signature: dict, outputs: dict[str, Path]) -> None:
     )
 
 
-def check_reduction(source: Grid, target: Grid) -> None:
-    """Reject unsupported grids instead of silently moving pixel centers."""
-    for g in (source, target):
-        t = g.transform
-        if g.crs is None or t.a <= 0 or t.e >= 0 or t.b != 0 or t.d != 0:
-            raise ValueError("main_diff requires north-up georeferenced grids")
-    if source.crs != target.crs:
-        raise ValueError("main_diff requires matching source/target CRS")
-    if target.transform.a < source.transform.a * (1 - 1e-8) or abs(
-        target.transform.e
-    ) < abs(source.transform.e) * (1 - 1e-8):
-        raise ValueError("Target must not be finer than source in either axis")
