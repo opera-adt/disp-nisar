@@ -1,8 +1,9 @@
 """A/(A-B) estimation with fixed date-based output paths.
 
-Resume checks final-file existence only. Changing inputs, reference, grid or
-settings requires resume=False (for the entire rerun), or removal of affected
-outputs and all dependent stages. Hash/attempt caches are not auto-migrated.
+Pair/inversion resume checks file existence. Filtered and exported rasters
+also check raw-input and filter-setting signatures. Changing upstream inputs,
+reference, or grid still requires invalidating affected upstream stages.
+Old untagged filtered/exported products are regenerated once.
 Preparation/inversion are windowed; gap filling uses one full B-grid array.
 
 Dolphin/SNAPHU still controls unwrap memory. Phase-linked SLCs are consumed through
@@ -33,8 +34,8 @@ from ._main_diff_io import (
 from .gslc_mask import prepare_gslc_mask_cache
 from .inversion import build_design_matrix, invert_common_phase_block
 from .ionosphere_filter import (
-    FilterConfig,
-    filter_ionosphere_phase,
+    apply_ionosphere_filter,
+    filter_cache_signature,
 )
 from .options import IonosphereOptions
 from .utils import (
@@ -1135,6 +1136,22 @@ def run_main_diff_estimation(
         )
 
 
+def _filter_cache_matches(path, raw_path, options):
+    """Reuse a filtered/exported raster only for the same raw input and settings.
+
+    Untagged products from earlier versions are regenerated. A failed metadata
+    read is treated as a cache miss, not as a reason to reuse a partial file.
+    """
+    if not options.resume or not Path(path).is_file() or not Path(raw_path).is_file():
+        return False
+    try:
+        signature = filter_cache_signature(raw_path, options)
+        with rasterio.open(path) as ds:
+            return ds.tags().get("ionosphere_filter_signature") == signature
+    except (OSError, ValueError, rasterio.errors.RasterioError):
+        return False
+
+
 def _run_locked(
     band_a,
     band_b,
@@ -1179,8 +1196,8 @@ def _run_locked(
     selection, network inversion, filtering/filling, and product export.
     Resume relies on file existence: changed inputs or settings require
     invalidating the affected outputs and their dependent stages.
-    Filtering uses the explicit FilterConfig values below; they are not
-    derived from options.smooth_sigma_m.
+    Filtering is selected by options.filtering. Its settings and the raw
+    raster identity are checked before filled/correction outputs are reused.
 
     """
     method = options.method
@@ -1195,9 +1212,8 @@ def _run_locked(
     ]
     if len(set(final_paths)) != len(final_paths):
         raise ValueError("Duplicate output date pairs")
-    if options.resume and all(p.is_file() for p in final_paths):
-        logger.info("Reusing all existing ionosphere corrections")
-        return final_paths
+    # Filter settings must be checked against each raw raster before reusing
+    # final products. An existence-only early return would ignore config edits.
     _estimate_iono(
         method,
         f_a,
@@ -1247,13 +1263,15 @@ def _run_locked(
     ]
     inversion_ready = options.resume and all(p.is_file() for p in raw_paths)
     need_masks = not inversion_ready or any(
-        not final.is_file()
-        and not (
-            out_dir
-            / "timeseries"
-            / ("_".join(d.strftime("%Y%m%d") for d in pair) + "_iono_B_filled.rad.tif")
-        ).is_file()
-        for pair, final in zip(output_pairs, final_paths, strict=True)
+        not _filter_cache_matches(final, raw, options)
+        and not _filter_cache_matches(
+            raw.with_name(
+                raw.name.replace("_iono_B.rad.tif", "_iono_B_filled.rad.tif")
+            ),
+            raw,
+            options,
+        )
+        for raw, final in zip(raw_paths, final_paths, strict=True)
     )
     cached_masks = (
         {
@@ -1387,12 +1405,12 @@ def _run_locked(
     ):
         output_path = correction_dir / f"{name}_iono.tif"
         outputs.append(output_path)
-        if options.resume and output_path.is_file():
+        if _filter_cache_matches(output_path, src, options):
             logger.info("%s: reusing correction", name)
             continue
 
         filled_path = timeseries_dir / f"{name}_iono_B_filled.rad.tif"
-        if options.resume and filled_path.is_file():
+        if _filter_cache_matches(filled_path, src, options):
             logger.info("%s: reusing filled ionosphere", name)
         else:
             with rasterio.open(src) as ds:
@@ -1415,21 +1433,22 @@ def _run_locked(
                             inside = mask_vrt.read(1, masked=True).filled(0)
                     footprint &= inside > 0
             trusted = footprint & np.isfinite(iono)
-            # Preserve the supplied filtering behavior and trial parameters.
-            # The footprint limits output extent; trusted pixels supply donors.
-            result = filter_ionosphere_phase(
+            # All filter controls come from the main algorithm parameters.
+            # No calibrated inversion uncertainty is currently available, so
+            # ISCE3-style filtering uses equal initial precision explicitly.
+            logger.info(
+                "%s: applying ionosphere filter %s with settings %s",
+                name,
+                options.filtering.method,
+                options.filtering.model_dump(mode="json"),
+            )
+            result = apply_ionosphere_filter(
                 iono,
                 donor_mask=trusted,
                 footprint=footprint,
                 pixel_size_m=(dy_m, dx_m),
+                options=options,
                 phase_std=None,
-                config=FilterConfig(
-                    sigma_m=(300.0, 300.0),  # trial widths in meters
-                    max_fill_m=600.0,  # meters
-                    min_support=0.10,
-                    donor_erosion_px=(0, options.mask_erosion_px),
-                    robust_passes=1,
-                ),
             )
             iono_filled = result.phase
             logger.info(
@@ -1454,6 +1473,8 @@ def _run_locked(
                 dst.update_tags(
                     ionosphere_method=method,
                     phase_convention="dolphin_ifg_ref_times_conj_sec",
+                    ionosphere_filter_method=options.filtering.method,
+                    ionosphere_filter_signature=filter_cache_signature(src, options),
                 )
             temporary_filled.replace(filled_path)
 
@@ -1467,5 +1488,10 @@ def _run_locked(
             options.block_size,
             method=method,
         )
+        with rasterio.open(temporary_output, "r+") as dst:
+            dst.update_tags(
+                ionosphere_filter_method=options.filtering.method,
+                ionosphere_filter_signature=filter_cache_signature(src, options),
+            )
         temporary_output.replace(output_path)
     return outputs

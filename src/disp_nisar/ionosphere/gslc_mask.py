@@ -10,6 +10,7 @@ import rasterio
 from affine import Affine
 from dolphin import io
 from rasterio.crs import CRS
+from rasterio.windows import Window
 
 from ._main_diff_io import (
     Grid,
@@ -52,7 +53,13 @@ def reduce_gslc_mask(dataset, source: Grid, target: Grid, mode: str, tile_size: 
     st, dt = source.transform, target.transform
     y0, y1 = _intervals(st.f, st.e, dt.f, dt.e, target.height)
     x0, x1 = _intervals(st.c, st.a, dt.c, dt.a, target.width)
-    for win in windows(target, tile_size):
+
+    for block in io.iter_blocks(
+        arr_shape=(target.height, target.width),
+        block_shape=(tile_size, tile_size),
+    ):
+        rows, cols = block
+        win = Window.from_slices(rows, cols)
         r, c, h, w = map(int, (win.row_off, win.col_off, win.height, win.width))
         a0, a1 = y0[r : r + h], y1[r : r + h]
         b0, b1 = x0[c : c + w], x1[c : c + w]

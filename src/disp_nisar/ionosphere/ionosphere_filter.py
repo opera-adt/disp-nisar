@@ -1,55 +1,25 @@
-"""Experimental donor-only filtering of unwrapped ionospheric phase (radians).
+"""Selectable filtering for real, unwrapped ionospheric phase in radians.
 
-Dependencies: numpy, scipy; rasterio only for filter_ionosphere_raster().
-Use the unfilled ionosphere estimate, never a corrected displacement/IFG.
+The pipeline uses apply_ionosphere_filter() with validated algorithm-file
+options. Available methods are isce3 (guide/filter, fill, restore original
+observations, final weighted filter), smooth_iono (the existing smoother),
+and donor_only (the original bounded-donor prototype retained below).
 
-To experiment on saved, aligned rasters without repeating phase linking,
-unwrapping, or time-series inversion:
+The ISCE3-style method ports the sequence from IonosphereFilter.low_pass_filter
+and the inverse-variance principle in filter_data_with_sig. It uses SciPy,
+not the compiled ISCE3 backend, and does not claim bitwise equivalence.
+Source reviewed: isce-framework/isce3 at
+043aa4b84f94f6cd99b84b03bb8001c2b8ddab20, under
+python/packages/isce3/atmosphere/ionosphere_filter.py.
 
-    filter_ionosphere_raster(
-        "20260624_20260706_iono_B.rad.tif",
-        "20260624_20260706_iono_B_filter_v2.rad.tif",
-        footprint_path="common_footprint_B.tif",
-        donor_mask_path="trusted_donors_B.tif",  # optional
-        std_path=None,  # optional calibrated ionosphere std raster
-        diagnostics_path="20260624_20260706_filter_diagnostics.tif",
-        config=FilterConfig(sigma_m=(300, 300), max_fill_m=600),
-    )
+All arrays must share a grid, phase convention, and reference. Zero radians
+is valid. A spatially coherent unwrap offset is not repaired by filtering.
+Formal uncertainties assume independent errors and omit covariance introduced
+by filling, reference uncertainty, model bias, and interpolation error.
+The pipeline currently has no calibrated phase_std and uses equal precision.
 
-The footprint/donor names above are examples, not assumed pipeline outputs.
-Use masks on the B grid and a new output name when comparing parameter sets.
-
-Example inside the reviewed disp-nisar main_diff.py, in place of the
-apply_similarity_mask_and_fill() call (keep the existing correction writer):
-
-    result = filter_ionosphere_phase(
-        iono, donor_mask=trusted, footprint=footprint,
-        pixel_size_m=(dy_m, dx_m),
-        config=FilterConfig(sigma_m=(300, 300), max_fill_m=600,
-                            donor_erosion_px=(0, options.mask_erosion_px)),
-        phase_std=None,  # optional calibrated ionosphere uncertainty, radians
-    )
-    iono_filled = result.phase
-
-All arrays must already have the same grid, phase convention, and reference.
-Zero phase is valid. Unreferenced unwrap components must be excluded upstream.
-Widths are Gaussian standard deviations, NOT kernel radii or FWHM.
-The output reference value can change; re-reference through the existing
-correction writer after matching the frequency-A grid.
-
-This original NumPy/SciPy prototype follows the inverse-variance filtering
-principle in ISCE3 filter_data_with_sig, with disp-nisar-specific mask/distance
-controls. It does not copy ISCE3's file-based low_pass_filter implementation:
-https://github.com/isce-framework/isce3/blob/develop/python/packages/isce3/atmosphere/ionosphere_filter.py
-https://github.com/isce-framework/isce3/blob/develop/python/packages/nisar/workflows/ionosphere.py
-Source revision reviewed: ba0f9960359cebdba34b6bde099e306cf6db1eba.
-Validation: 18 synthetic and GeoTIFF tests, including block/full-array equality.
-Not validated with real NISAR frames or the compiled ISCE3 filter backend.
-
-Formal output uncertainty assumes independent input errors and treats fitted
-robust weights as fixed. It excludes spatial/temporal covariance, reference
-uncertainty, filtering bias, and interpolation/model error. Similarity and
-temporal coherence are not calibrated phase standard deviations.
+filter_ionosphere_phase() and filter_ionosphere_raster() retain the previous
+bounded donor-only API. The raster wrapper is not the selectable dispatcher.
 """
 
 from __future__ import annotations
@@ -66,6 +36,8 @@ from scipy import ndimage as ndi
 
 @dataclass(frozen=True)
 class FilterConfig:
+    """Controls for the retained bounded, original-donor Gaussian filter."""
+
     sigma_m: tuple[float, float] = (300.0, 300.0)  # (row, column)
     max_fill_m: float = 600.0
     min_support: float = 0.10
@@ -77,6 +49,7 @@ class FilterConfig:
     truncate: float = 4.0
 
     def validate(self) -> None:
+        """Reject invalid widths, support thresholds, and robust-fit controls."""
         if len(self.sigma_m) != 2 or any(
             not np.isfinite(s) or s <= 0 for s in self.sigma_m
         ):
@@ -108,6 +81,8 @@ class FilterConfig:
 
 @dataclass
 class FilterResult:
+    """Filtered phase, optional formal uncertainty, and support diagnostics."""
+
     phase: np.ndarray
     std: np.ndarray | None
     support: np.ndarray
@@ -487,3 +462,362 @@ def filter_ionosphere_raster(
         for path in temporary:
             path.unlink(missing_ok=True)
     return str(destination)
+
+
+def _fill_from_samples(values, valid, method):
+    """Fill missing values by nearest or linear interpolation with nearest fallback.
+
+    Original samples are retained. Linear interpolation falls back to nearest
+    for degenerate sample geometry and locations outside the convex hull.
+    """
+    if not valid.any():
+        return np.full(values.shape, np.nan, dtype=np.float64)
+    nearest = ndi.distance_transform_edt(
+        ~valid, return_distances=False, return_indices=True
+    )
+    filled = np.asarray(values[tuple(nearest)], dtype=np.float64)
+    if method == "linear" and (~valid).any():
+        from scipy.interpolate import griddata
+        from scipy.spatial import QhullError
+
+        points = np.column_stack(np.nonzero(valid))
+        targets = np.column_stack(np.nonzero(~valid))
+        try:
+            interpolated = griddata(points, values[valid], targets, method="linear")
+        except (QhullError, ValueError):
+            interpolated = np.full(len(targets), np.nan)
+        candidate = filled[~valid]
+        finite = np.isfinite(interpolated)
+        candidate[finite] = interpolated[finite]
+        filled[~valid] = candidate
+    filled[valid] = values[valid]
+    return filled
+
+
+def _normalized_filter(values, weights, kernels):
+    """Compute Gaussian weighted means without allowing NaN times zero."""
+    good = np.isfinite(values) & np.isfinite(weights) & (weights > 0)
+    precision = np.where(good, weights, 0.0)
+    numerator = _convolve(np.where(good, values, 0.0) * precision, kernels)
+    denominator = _convolve(precision, kernels)
+    return (
+        np.divide(
+            numerator,
+            denominator,
+            out=np.full(values.shape, np.nan),
+            where=denominator > np.finfo(float).tiny,
+        ),
+        denominator,
+    )
+
+
+def _build_filter_guide(values, settings, kernels):
+    """Construct a NaN-aware median/Gaussian guide before filling.
+
+    Recent SciPy supports a bounded-memory vectorized median. Fall back to
+    generic_filter for older deployments without changing the statistic.
+    """
+    if settings.guide_filter_method == "none":
+        return values.copy()
+    guide = values.copy()
+    if settings.guide_filter_method == "median_gaussian":
+        if hasattr(ndi, "vectorized_filter"):
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                guide = ndi.vectorized_filter(
+                    guide,
+                    np.nanmedian,
+                    size=settings.guide_median_size,
+                    mode="reflect",
+                    batch_memory=32 * 1024**2,
+                )
+        else:
+            guide = ndi.generic_filter(
+                guide,
+                lambda a: (
+                    np.median(a[np.isfinite(a)]) if np.isfinite(a).any() else np.nan
+                ),
+                size=settings.guide_median_size,
+                mode="reflect",
+            )
+    guide, _ = _normalized_filter(guide, np.isfinite(guide), kernels)
+    return guide
+
+
+def filter_ionosphere_isce3(
+    phase,
+    *,
+    donor_mask,
+    footprint,
+    pixel_size_m,
+    settings,
+    sigma_m,
+    donor_erosion_px=(0, 0),
+    phase_std=None,
+):
+    """Apply the ISCE3-style guide/fill/restore/weighted-filter sequence.
+
+    Parameters
+    ----------
+    phase : np.ndarray
+        Real unwrapped ionospheric phase, in radians, on a single grid.
+    donor_mask, footprint : np.ndarray
+        Original observation support and allowed output domain, respectively.
+    pixel_size_m, sigma_m : tuple[float, float]
+        Pixel spacing and Gaussian standard deviations in (row, column) order.
+    settings : IonosphereFilterOptions
+        Kernel, guide, filling, iteration, and outlier controls.
+    donor_erosion_px : tuple[int, int], optional
+        Additional donor exclusion radii along the row and column axes.
+    phase_std : np.ndarray, optional
+        Calibrated phase uncertainty in radians. Without it, filtering uses
+        uniform precision and reports no formal output standard deviation.
+
+    Returns
+    -------
+    FilterResult
+        Smoothed phase and original-donor diagnostics. Filled phase/sigma
+        participate in the final filter, unlike the donor_only method.
+
+    Notes
+    -----
+    This is a NumPy/SciPy implementation of the filtering sequence, not a
+    call to the compiled ISCE3 backend. Each iteration masks the working
+    image to the original donor support and restores original samples.
+    Consequently extra iterations need not change the result.
+    Rejected outliers are NOT restored as trusted samples. This deliberately
+    avoids reintroducing rejected samples at the restoration step in the
+    reviewed ISCE3 implementation. No component labeling or unwrap-error
+    correction is performed here. Zero radians is a valid observation.
+
+    """
+    data = _float_array(phase)
+    domain = _mask_array(footprint, data.shape)
+    valid = _mask_array(donor_mask, data.shape) & domain & np.isfinite(data)
+    spacing = np.asarray(pixel_size_m, dtype=np.float64)
+    if spacing.shape != (2,) or not np.isfinite(spacing).all() or (spacing <= 0).any():
+        raise ValueError("pixel_size_m must contain positive row/column spacings")
+    uncertainty = None
+    if phase_std is not None:
+        uncertainty = _float_array(phase_std, data.shape)
+        valid &= np.isfinite(uncertainty) & (uncertainty >= 0)
+        uncertainty = np.maximum(uncertainty, settings.std_floor_rad)
+    if any(donor_erosion_px):
+        invalid = ndi.maximum_filter(
+            (~valid).astype(np.uint8),
+            size=tuple(2 * n + 1 for n in donor_erosion_px),
+            mode="nearest",
+        )
+        valid &= invalid == 0
+    if not valid.any():
+        empty = np.full(data.shape, np.nan, np.float32)
+        return FilterResult(
+            empty,
+            None if uncertainty is None else empty.copy(),
+            np.zeros(data.shape, np.float32),
+            np.full(data.shape, np.inf, np.float32),
+            np.zeros(data.shape, np.float32),
+        )
+
+    # ISCE3 exposes kernel lengths and sigmas separately. Permit the same
+    # control, while accepting widths in meters on the geocoded grid.
+    sigma_pixels = np.asarray(sigma_m, np.float64) / spacing
+    kernels = []
+    for axis, sigma in enumerate(sigma_pixels):
+        if settings.kernel_size_px is None:
+            kernels.append(_gaussian_kernel(sigma, settings.truncate))
+        else:
+            radius = settings.kernel_size_px[axis] // 2
+            coords = np.arange(-radius, radius + 1, dtype=np.float64)
+            kernel = np.exp(-0.5 * (coords / sigma) ** 2)
+            kernels.append(kernel / kernel.sum())
+    kernels = tuple(kernels)
+    original = np.where(valid, data, np.nan)
+    current = original.copy()
+    output_std = None
+    retained = valid.copy()
+
+    for _ in range(settings.iterations):
+        # Restore observations before guide construction, as in ISCE3.
+        working = np.where(valid, current, np.nan)
+        working[valid] = original[valid]
+        guide = _build_filter_guide(working, settings, kernels)
+
+        # Compute a block-wide MAD, matching the structure of ISCE3's guide
+        # residual test. Keep outlier rejection distinct from donor erosion.
+        retained = valid.copy()
+        if (
+            settings.outlier_threshold is not None
+            and settings.guide_filter_method != "none"
+        ):
+            residual = working - guide
+            eligible = valid & np.isfinite(residual)
+            if eligible.any():
+                center = np.median(residual[eligible])
+                scale = max(
+                    1.4826 * np.median(np.abs(residual[eligible] - center)),
+                    settings.outlier_min_scale_rad,
+                )
+                retained[eligible] &= (
+                    np.abs(residual[eligible] - center)
+                    <= settings.outlier_threshold * scale
+                )
+                if not np.array_equal(retained, valid):
+                    cleaned = np.where(retained, data, np.nan)
+                    guide = _build_filter_guide(cleaned, settings, kernels)
+
+        # Fill the guide first. Unlike donor_only, these modeled samples
+        # contribute to the final Gaussian filter, even in large gaps.
+        guide_valid = np.isfinite(guide) & domain
+        filled = _fill_from_samples(guide, guide_valid, settings.filling_method)
+        # Restore ORIGINAL accepted observations before the final filtering.
+        filled[retained] = data[retained]
+        if uncertainty is None:
+            precision = domain.astype(np.float64)
+            filled_sigma = None
+        else:
+            filled_sigma = _fill_from_samples(
+                uncertainty, retained, settings.filling_method
+            )
+            filled_sigma[retained] = uncertainty[retained]
+            precision = np.where(domain, 1.0 / filled_sigma**2, 0.0)
+        current, denominator = _normalized_filter(filled, precision, kernels)
+        current[~domain] = np.nan
+        if filled_sigma is not None:
+            # Formal independent-error propagation; interpolation covariance
+            # and uncertainty of filled/model values are not captured.
+            variance_num = _convolve(
+                np.where(domain, precision**2 * filled_sigma**2, 0.0),
+                kernels,
+                squared=True,
+            )
+            variance = np.divide(
+                variance_num,
+                denominator**2,
+                out=np.full(data.shape, np.nan),
+                where=denominator > 0,
+            )
+            output_std = np.sqrt(variance)
+            output_std[~domain] = np.nan
+
+    support, _ = _normalized_filter(valid.astype(float), domain, kernels)
+    distance = ndi.distance_transform_edt(~retained, sampling=spacing)
+    distance[~domain] = np.inf
+    if settings.restore_mask:
+        current[~retained] = np.nan
+        if output_std is not None:
+            output_std[~retained] = np.nan
+    return FilterResult(
+        current.astype(np.float32),
+        None if output_std is None else output_std.astype(np.float32),
+        support.astype(np.float32),
+        distance.astype(np.float32),
+        retained.astype(np.float32),
+    )
+
+
+def apply_ionosphere_filter(
+    phase, *, donor_mask, footprint, pixel_size_m, options, phase_std=None
+):
+    """Dispatch the configured method on an aligned unwrapped phase array.
+
+    The main algorithm file owns these options. A null filtering.sigma_m
+    falls back to the existing smooth_sigma_m scalar; a null erosion pair
+    falls back to (0, mask_erosion_px). No coherence-to-sigma proxy is invented.
+    """
+    settings = options.filtering
+    sigma_m = settings.sigma_m or (options.smooth_sigma_m,) * 2
+    erosion = (
+        settings.donor_erosion_px
+        if settings.donor_erosion_px is not None
+        else (0, options.mask_erosion_px)
+    )
+    if settings.method == "isce3":
+        return filter_ionosphere_isce3(
+            phase,
+            donor_mask=donor_mask,
+            footprint=footprint,
+            pixel_size_m=pixel_size_m,
+            settings=settings,
+            sigma_m=sigma_m,
+            donor_erosion_px=erosion,
+            phase_std=phase_std,
+        )
+    if settings.method == "donor_only":
+        return filter_ionosphere_phase(
+            phase,
+            donor_mask=donor_mask,
+            footprint=footprint,
+            pixel_size_m=pixel_size_m,
+            phase_std=phase_std,
+            config=FilterConfig(
+                sigma_m=sigma_m,
+                donor_erosion_px=erosion,
+                max_fill_m=settings.max_fill_m,
+                min_support=settings.min_support,
+                robust_passes=settings.robust_passes,
+                robust_cutoff=settings.robust_cutoff,
+                robust_floor_rad=settings.robust_floor_rad,
+                std_floor_rad=settings.std_floor_rad,
+                truncate=settings.truncate,
+            ),
+        )
+    # Reuse the existing implementation rather than copying its nearest-fill
+    # and Gaussian operations. Its boundary/kernel behavior is preserved.
+    from .utils import smooth_iono
+
+    data = _float_array(phase)
+    domain = _mask_array(footprint, data.shape)
+    valid = _mask_array(donor_mask, data.shape) & domain & np.isfinite(data)
+    if any(erosion):
+        gaps = ndi.maximum_filter(
+            (~valid).astype(np.uint8),
+            size=tuple(2 * n + 1 for n in erosion),
+            mode="nearest",
+        )
+        valid &= gaps == 0
+    if not valid.any():
+        empty = np.full(data.shape, np.nan, np.float32)
+        return FilterResult(
+            empty,
+            None,
+            np.zeros(data.shape, np.float32),
+            np.full(data.shape, np.inf, np.float32),
+            np.zeros(data.shape, np.float32),
+        )
+    sigma_px = tuple(s / d for s, d in zip(sigma_m, pixel_size_m))
+    filtered = smooth_iono(
+        data, sigma=sigma_px, mask=valid, restore_mask=settings.restore_mask
+    )
+    filtered[~domain] = np.nan
+    return FilterResult(
+        filtered,
+        None,
+        valid.astype(np.float32),
+        ndi.distance_transform_edt(~valid, sampling=pixel_size_m).astype(np.float32),
+        valid.astype(np.float32),
+    )
+
+
+def filter_cache_signature(raw_path, options):
+    """Identify raw input and all selected filter settings for cache reuse.
+
+    Source modification time and size invalidate the cache after inversion.
+    Version the implementation to invalidate earlier file-existence caches.
+    """
+    import hashlib
+
+    source = Path(raw_path).resolve()
+    stat = source.stat()
+    record = {
+        "version": "selectable-filter-v1",
+        "raw": str(source),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "filtering": options.filtering.model_dump(mode="json"),
+        "smooth_sigma_m": options.smooth_sigma_m,
+        "mask_erosion_px": options.mask_erosion_px,
+    }
+    return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
