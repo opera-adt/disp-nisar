@@ -16,6 +16,8 @@ dependencies:
   - pydantic>=2.1
   - ruamel.yaml>=0.15
   - rioxarray
+  - geopandas  # opera_utils.nisar imports it but doesn't declare it as a dep
+  - rich  # opera_utils.missing_data imports this but doesn't declare it as a dep
   - yamale
   # Corrections
   - pysolid  # For solid earth tide corrections
