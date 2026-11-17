@@ -1863,7 +1863,9 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
                 "epsg_code": epsg,
                 "GeoTransform": " ".join(str(v) for v in gt),
                 "units": "unitless",
-                "long_name": "Dummy variable with geo-referencing metadata in attributes",
+                "long_name": (
+                    "Dummy variable with geo-referencing metadata in attributes"
+                ),
             }
         )
         for name, arr in ((y_name, y_arr), (x_name, x_arr)):
@@ -2138,9 +2140,7 @@ def create_compressed_products(
             logger.info(valid_date_files)
 
             cur_opera_cslc = valid_date_files[-1]
-            c = CompressedSLCInfo(
-                comp_slc_file, output_dir, cur_opera_cslc, subdataset
-            )
+            c = CompressedSLCInfo(comp_slc_file, output_dir, cur_opera_cslc, subdataset)
             compressed_slc_infos.append(c)
 
     # executor_class = (

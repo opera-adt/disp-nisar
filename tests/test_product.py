@@ -112,9 +112,10 @@ def test_compressed_slc_has_gslc_layout(tmp_path):
             "centerFrequency",
         ):
             assert f"{grid}/{name}" in hf, name
-        assert int(hf[f"{grid}/projection"][()]) == hf[f"{grid}/projection"].attrs[
-            "epsg_code"
-        ]
+        assert (
+            int(hf[f"{grid}/projection"][()])
+            == hf[f"{grid}/projection"].attrs["epsg_code"]
+        )
         # The old COMPASS-style names are gone
         assert "x_coordinates" not in hf[grid]
         assert "data" not in hf
