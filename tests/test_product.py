@@ -85,6 +85,69 @@ def test_create_compressed_slc(tmp_path):
     # assert "/metadata/processing_information/input_burst_metadata/wavelength" in hf
 
 
+def test_compressed_slc_has_gslc_layout(tmp_path):
+    """Compressed SLCs are readable by the same code that reads real GSLCs."""
+    import numpy as np
+    from dolphin import io
+
+    from disp_nisar._common import NISAR_DATASET_NAME
+    from disp_nisar._ps import run_combine
+    from disp_nisar._utils import _frequency_to_wavelength, get_nisar_frame_bbox
+
+    [out] = product.create_compressed_products(
+        {"": [TEST_OUTPUT_CGSLC_FILE]},
+        cslc_file_list=[TEST_GSLC_FILE],
+        output_dir=tmp_path,
+    )
+    grid = "/science/LSAR/GSLC/grids/frequencyA"
+    with h5py.File(out) as hf:
+        for name in (
+            "HH",
+            "amplitude_dispersion",
+            "xCoordinates",
+            "yCoordinates",
+            "xCoordinateSpacing",
+            "yCoordinateSpacing",
+            "projection",
+            "centerFrequency",
+        ):
+            assert f"{grid}/{name}" in hf, name
+        assert int(hf[f"{grid}/projection"][()]) == hf[f"{grid}/projection"].attrs[
+            "epsg_code"
+        ]
+        # The old COMPASS-style names are gone
+        assert "x_coordinates" not in hf[grid]
+        assert "data" not in hf
+
+    # Geometry matches the processed raster it was made from
+    epsg, bbox = get_nisar_frame_bbox(out)
+    assert epsg == io.get_raster_crs(TEST_OUTPUT_CGSLC_FILE).to_epsg()
+    left, bottom, right, top = io.get_raster_bounds(TEST_OUTPUT_CGSLC_FILE)
+    np.testing.assert_allclose(
+        [bbox.left, bbox.bottom, bbox.right, bbox.top],
+        [left, bottom, right, top],
+    )
+    # Wavelength is read from the GSLC-location centerFrequency, copied from the GSLC
+    assert _frequency_to_wavelength("frequencyA", out) == _frequency_to_wavelength(
+        "frequencyA", TEST_GSLC_FILE
+    )
+
+    # And the dispersion/SLC are found where `run_combine` looks for them
+    shape = io.get_raster_xysize(TEST_OUTPUT_CGSLC_FILE)[::-1]
+    mean = tmp_path / "mean.tif"
+    disp = tmp_path / "disp.tif"
+    for f in (mean, disp):
+        io.write_arr(
+            arr=np.ones(shape, dtype="float32"),
+            output_name=f,
+            like_filename=TEST_OUTPUT_CGSLC_FILE,
+        )
+    out_disp, out_mean = run_combine(
+        mean, disp, [out], num_slc=2, subdataset=NISAR_DATASET_NAME
+    )
+    assert out_disp.exists() and out_mean.exists()
+
+
 def test_nodata_mask_keeps_exact_zero_pixels():
     """The reference pixel is exactly 0.0 and must not be treated as nodata."""
     import numpy as np
