@@ -60,9 +60,8 @@ except ImportError:
 from pydantic import ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from ._log import InputValidationError
-
 from ._common import NISAR_DATASET_NAME
+from ._log import InputValidationError
 from ._utils import _frequency_to_wavelength, get_nisar_frame_bbox
 from .enums import ImagingFrequency, Polarization, ProcessingMode
 

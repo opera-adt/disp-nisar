@@ -22,6 +22,7 @@ from opera_utils import get_dates, group_by_date
 from opera_utils.nisar import get_gslc_mask
 
 from disp_nisar import __version__, product
+from disp_nisar._log import InputValidationError
 from disp_nisar._masking import (
     create_mask_from_distance,  # , create_layover_shadow_masks
 )
@@ -36,7 +37,6 @@ from disp_nisar._utils import (
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
 )
-from disp_nisar._log import InputValidationError
 from disp_nisar.ionosphere import get_ionosphere_phase_screen
 from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 

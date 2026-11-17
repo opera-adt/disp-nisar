@@ -599,9 +599,11 @@ def test_forward_mode_network_no_redo_reference():
     """`redo_reference=False` turns on dolphin's compressed reference anchor."""
     if not pge_runconfig._DOLPHIN_HAS_ANCHOR:
         pytest.skip("dolphin has no compressed_reference_anchor")
-    assert not pge_runconfig._create_forward_mode_network(
-        3
-    ).model_dump().get("compressed_reference_anchor", False)
+    assert (
+        not pge_runconfig._create_forward_mode_network(3)
+        .model_dump()
+        .get("compressed_reference_anchor", False)
+    )
     net = pge_runconfig._create_forward_mode_network(3, redo_reference=False)
     assert net.compressed_reference_anchor
 
