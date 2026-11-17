@@ -564,8 +564,13 @@ class RunConfig(YamlModel):
         # If we add modes or polarization, then that could be checked in this section
         # as well
 
+        # The frame check is against a real GSLC; compressed SLCs sort first by date
+        first_gslc = next(
+            (f for f in gslc_file_list if "compressed" not in Path(f).name.lower()),
+            gslc_file_list[0],
+        )
         bounds_epsg_gslc, bounds_gslc = get_nisar_frame_bbox(
-            self.input_file_group.gslc_file_list[0],
+            first_gslc,
             frequency=frequency,
             polarization=polarization,
         )
@@ -590,12 +595,12 @@ class RunConfig(YamlModel):
 
         # Setup the OPERA-specific options to adjust from dolphin's defaults
         try:
-            wavelength = _frequency_to_wavelength(frequency, gslc_file_list[0])
+            wavelength = _frequency_to_wavelength(frequency, first_gslc)
         except (KeyError, OSError):
             logger.warning(
                 "Could not read center frequency from %s; wavelength will not be set"
                 " and timeseries will remain in radians.",
-                gslc_file_list[0],
+                first_gslc,
             )
             wavelength = None
         input_options = {

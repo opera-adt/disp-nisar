@@ -283,7 +283,7 @@ def run(
 
     # Obtain wavelength based on frequency
     wavelength = _frequency_to_wavelength(
-        pge_runconfig.input_file_group.frequency, cfg.cslc_file_list[0]
+        pge_runconfig.input_file_group.frequency, first_non_compressed
     )
 
     # IONOSPHERE
@@ -338,7 +338,7 @@ def run(
 
         # Run split-spectrum ionosphere estimation for freq.B and freq.A
         # use runconfigs as input to run_ionosphere_estimation.
-        f_A, f_B = get_center_frequencies(cfg_freqB.cslc_file_list[0])
+        f_A, f_B = get_center_frequencies(first_non_compressed)
         out_paths.ionospheric_corrections = [
             iono_path
             for _, iono_path, _ in run_ionosphere_estimation(
@@ -615,6 +615,7 @@ def create_products(
             comp_slc_dict=out_paths.comp_slc_dict,
             output_dir=output_dir,
             cslc_file_list=cfg.cslc_file_list,
+            subdataset=cfg.input_options.subdataset,
         )
 
 

@@ -241,7 +241,24 @@ def test_reference_changeover(
     static_ancillary_file_group,
     product_path_group,
     sample_slc_list,
+    monkeypatch,
 ):
+    # Only the first file exists on disk. The GSLC metadata is read from the first
+    # real GSLC (not the compressed SLC), whose filename here is a placeholder, so
+    # read the on-disk sample instead.
+    on_disk = sample_slc_list[0]
+    orig_bbox = pge_runconfig.get_nisar_frame_bbox
+    orig_wavelength = pge_runconfig._frequency_to_wavelength
+    monkeypatch.setattr(
+        pge_runconfig,
+        "get_nisar_frame_bbox",
+        lambda _f, **kw: orig_bbox(on_disk, **kw),
+    )
+    monkeypatch.setattr(
+        pge_runconfig,
+        "_frequency_to_wavelength",
+        lambda freq, _f: orig_wavelength(freq, on_disk),
+    )
     rc = RunConfig(
         input_file_group=InputFileGroup(gslc_file_list=sample_slc_list, frame_id=23210),
         primary_executable=PrimaryExecutable(),
