@@ -561,3 +561,62 @@ def test_parse_reference_date_json():
     # None file returns empty list
     result = pge_runconfig._parse_reference_date_json(None, 23210)
     assert result == []
+
+
+def test_forward_mode_network_nearest4_has_no_duplicate_pairs():
+    """The nearest-4 network must not repeat a pair (regression: (-5, -2) twice)."""
+    net4 = pge_runconfig._create_forward_mode_network(nearest_n=4)
+    assert len(set(net4.indexes)) == len(net4.indexes) == 10
+    assert (-5, -4) in net4.indexes
+
+
+def _slc_names(n_real, n_comp=1):
+    comp = [f"compressed_20240101_20230101_20240101_{i}.h5" for i in range(n_comp)]
+    real = [f"NISAR_{20240201 + i:08d}T000000.h5" for i in range(n_real)]
+    return comp + real
+
+
+@pytest.mark.parametrize("nearest_n", [3, 4])
+def test_forward_mode_network_depth_guard(nearest_n):
+    """Too-shallow stacks raise 2001; compressed SLCs do not count toward depth."""
+    from disp_nisar._log import InputValidationError
+
+    with pytest.raises(InputValidationError) as exc:
+        pge_runconfig._create_forward_mode_network(
+            nearest_n, cslc_file_list=_slc_names(nearest_n, n_comp=3)
+        )
+    assert exc.value.error_code == 2001
+
+    # Exactly enough real SLCs passes
+    pge_runconfig._create_forward_mode_network(
+        nearest_n, cslc_file_list=_slc_names(nearest_n + 1)
+    )
+    # No file list means no check
+    pge_runconfig._create_forward_mode_network(nearest_n)
+
+
+def test_forward_mode_network_no_redo_reference():
+    """`redo_reference=False` turns on dolphin's compressed reference anchor."""
+    if not pge_runconfig._DOLPHIN_HAS_ANCHOR:
+        pytest.skip("dolphin has no compressed_reference_anchor")
+    assert (
+        not pge_runconfig._create_forward_mode_network(3)
+        .model_dump()
+        .get("compressed_reference_anchor", False)
+    )
+    net = pge_runconfig._create_forward_mode_network(3, redo_reference=False)
+    assert net.compressed_reference_anchor
+
+
+def test_algorithm_parameters_anchor_not_settable():
+    """The anchor is derived from `forward_redo_reference`, not set directly."""
+    assert pge_runconfig.AlgorithmParameters().forward_redo_reference is True
+    with pytest.raises(ValueError, match="forward_redo_reference"):
+        pge_runconfig.AlgorithmParameters(
+            interferogram_network={"compressed_reference_anchor": True}
+        )
+
+
+def test_run_input_prechecks_default_on(runconfig_minimum):
+    """Prechecks are on by default, including when the key is absent from YAML."""
+    assert runconfig_minimum.run_input_prechecks is True

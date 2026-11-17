@@ -83,3 +83,16 @@ def test_create_compressed_slc(tmp_path):
             in hf
         )
     # assert "/metadata/processing_information/input_burst_metadata/wavelength" in hf
+
+
+def test_nodata_mask_keeps_exact_zero_pixels():
+    """The reference pixel is exactly 0.0 and must not be treated as nodata."""
+    import numpy as np
+
+    arr = np.ma.masked_array(
+        [[0.0, 1.0], [2.0, 3.0]], mask=[[False, False], [True, False]]
+    )
+    mask = product.nodata_mask(arr)
+    assert mask.tolist() == [[False, False], [True, False]]
+    # No mask at all -> nothing is nodata, even where the values are zero
+    assert not product.nodata_mask(np.ma.masked_array(np.zeros((2, 2)))).any()

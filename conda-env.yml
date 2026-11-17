@@ -16,6 +16,8 @@ dependencies:
   - pydantic>=2.1
   - ruamel.yaml>=0.15
   - rioxarray
+  - geopandas  # opera_utils.nisar imports it but doesn't declare it as a dep
+  - rich  # opera_utils.missing_data imports this but doesn't declare it as a dep
   - yamale
   # Corrections
   - pysolid  # For solid earth tide corrections
@@ -29,8 +31,10 @@ dependencies:
   - isce3-cpu>=0.16.0 # For baseline
   - tophu
   # - cxx-compiler # for whirlwind
-  - dolphin>=v0.36.2
   - aiohttp
   - s3fs
   - pip:
     - spurt>0.1.0
+    # conda-forge lags behind; use the GitHub tag (dolphin v0.43.0 needs opera-utils>=0.25.9)
+    - git+https://github.com/opera-adt/opera-utils@v0.25.9
+    - git+https://github.com/isce-framework/dolphin@v0.43.0
