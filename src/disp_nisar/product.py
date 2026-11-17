@@ -78,6 +78,18 @@ GRID_MAPPING_DSET = "spatial_ref"
 COMPRESSED_SLC_TEMPLATE = "compressed_{date_str}.h5"
 
 
+def nodata_mask(arr: np.ma.MaskedArray) -> np.ndarray:
+    """Where the unwrapped raster actually has no data.
+
+    Taken from the array's own mask rather than inferred from the values.
+    Inferring it -- `np.ma.filled(arr, 0) == 0` -- discards every pixel whose
+    unwrapped phase is exactly zero, and one pixel is guaranteed to be:
+    `dolphin.timeseries` subtracts the reference pixel's value from the whole
+    array, so the reference pixel is exactly 0.0 by construction.
+    """
+    return np.ma.getmaskarray(arr)
+
+
 def create_output_product(
     output_name: Filename,
     unw_filename: Filename,
@@ -222,10 +234,10 @@ def create_output_product(
 
     # Load and process unwrapped phase data, needs more custom masking
     unw_arr_ma = io.load_gdal(unw_filename, masked=True)
+    mask = nodata_mask(unw_arr_ma)
     unw_arr = np.ma.filled(unw_arr_ma, 0)
     del unw_arr_ma
     gc.collect()
-    mask = unw_arr == 0
 
     input_units = io.get_raster_units(unw_filename)
     if not input_units or input_units not in ("meters", "radians"):
