@@ -99,5 +99,7 @@ filterwarnings = [
   # DeprecationWarning thrown in pkg_resources for older numba verions and llvmlite
   "ignore:.*pkg_resources.*",
   "ignore:h5py is running against HDF5.*:UserWarning",
+  # affine>=3.1 warns on `*`, which rasterio.transform.from_bounds still uses
+  "ignore:Use `@` matmul instead of `\\*` mul operator.*:PendingDeprecationWarning",
   "ignore:Exception ignored in.* <_io.FileIO.*:pytest.PytestUnraisableExceptionWarning"
 ]
