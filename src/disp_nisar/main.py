@@ -36,10 +36,13 @@ from disp_nisar._utils import (
     _update_snaphu_conncomps,
     _update_spurt_conncomps,
 )
+from disp_nisar._log import InputValidationError
 from disp_nisar.ionosphere import get_ionosphere_phase_screen
 from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["InputValidationError"]
 
 
 @log_runtime
@@ -69,7 +72,23 @@ def run(
     # Add a check to fail if passed duplicate dates area passed
     _assert_no_duplicate_dates(cfg.cslc_file_list)
     _assert_compressed_slcs_consecutive(cfg.cslc_file_list)
-    _warn_date_gaps(cfg.cslc_file_list)
+
+    # Fail fast on a malformed input stack before the expensive workflow runs.
+    # `run_input_prechecks` (default true) gates every numbered check; 2001 is
+    # gated in `RunConfig.to_workflow`, which has already run by this point.
+    if pge_runconfig.run_input_prechecks:
+        _assert_no_compressed_slc_conflicts(
+            cfg.cslc_file_list, pge_runconfig.primary_executable.product_type
+        )
+        if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":
+            _assert_forward_mode_compressed(cfg.cslc_file_list)
+        _assert_no_large_temporal_gaps(cfg.cslc_file_list)
+    else:
+        logger.warning(
+            "run_input_prechecks is false: skipping input-validation prechecks"
+            " 1000-2001. A malformed input GSLC list will now fail inside the"
+            " workflow, or not at all."
+        )
 
     # Handle forward mode - get second to last date for re-referencing
     gslc_dates = [get_dates(f)[0] for f in cfg.cslc_file_list]
@@ -236,7 +255,12 @@ def run(
     _prune_block_dirs(cfg.work_directory)
 
     # Handle forward mode re-referencing
-    if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD":
+    is_forward = pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD"
+    # `forward_redo_reference: false` arrives here as dolphin's anchor flag.
+    anchored = getattr(cfg.interferogram_network, "compressed_reference_anchor", False)
+    if is_forward and anchored:
+        logger.info("Keeping the time series referenced to the compressed SLC epoch")
+    elif is_forward:
         from dolphin.timeseries import _redo_reference
 
         logger.info(f"Re-referencing time series rasters {out_paths.timeseries_paths}")
@@ -708,7 +732,7 @@ def _assert_no_duplicate_dates(input_file_list: Sequence[Path]) -> None:
     # Use a set to check for duplicate dates
     if len(sensing_date_list) > len(set(sensing_date_list)):
         msg = "Duplicate dates passed:\n"
-        file_string = "\n".join(sensing_date_list)
+        file_string = "\n".join(str(d) for d in sensing_date_list)
         msg += file_string
         raise ValueError(msg)
 
@@ -740,26 +764,147 @@ def _assert_compressed_slcs_consecutive(input_file_list: Sequence[Path]) -> None
             )
 
 
-def _warn_date_gaps(
+def _assert_no_large_temporal_gaps(
     input_file_list: Sequence[Path],
-    max_gap_days: int = 730,
+    max_gap_days: float = 2 * 365.25,
 ) -> None:
-    """Warn if any consecutive GSLC dates are separated by more than `max_gap_days`."""
-    is_compressed = ["compressed" in str(f).lower() for f in input_file_list]
-    non_compressed = [f for f, c in zip(input_file_list, is_compressed) if not c]
-    dates = sorted(get_dates(f)[0] for f in non_compressed)
-    if len(dates) < 2:
-        return
-    for d0, d1 in zip(dates, dates[1:]):
-        gap = (d1 - d0).days
-        if gap > max_gap_days:
-            logger.warning(
-                "Large temporal gap of %d days (> %d) between %s and %s",
-                gap,
-                max_gap_days,
-                d0.date() if hasattr(d0, "date") else d0,
-                d1.date() if hasattr(d1, "date") else d1,
+    """Assert no gap larger than ~2 years between consecutive real GSLC dates.
+
+    A multi-year gap in the input stack destroys interferometric coherence and
+    almost always indicates a malformed input list, so we fail fast. Compressed
+    SLCs are excluded here; only the real-GSLC acquisition dates are checked.
+
+    Raises
+    ------
+    InputValidationError
+        If any consecutive pair of real GSLC dates is more than ``max_gap_days``
+        apart (error_code=1000).
+
+    """
+    non_compressed = [f for f in input_file_list if "compressed" not in str(f).lower()]
+    real_dates = sorted({get_dates(f)[0] for f in non_compressed})
+
+    messages = []
+    for earlier, later in zip(real_dates, real_dates[1:]):
+        gap_days = (later - earlier).total_seconds() / 86400
+        if gap_days > max_gap_days:
+            messages.append(
+                f"{gap_days:.0f}-day ({gap_days / 365.25:.2f}-year) gap between"
+                f" {earlier:%Y-%m-%d} and {later:%Y-%m-%d}"
             )
+    if messages:
+        # Render the limit in whichever unit reads sensibly
+        limit = (
+            f"{max_gap_days / 365.25:.0f}-year"
+            if max_gap_days >= 365.25
+            else f"{max_gap_days:.0f}-day"
+        )
+        raise InputValidationError(
+            f"Temporal gap(s) exceeding the {limit} limit for input GSLCs:\n"
+            + "\n".join(messages),
+            error_code=1000,
+        )
+
+
+def _assert_no_compressed_slc_conflicts(
+    input_file_list: Sequence[Path],
+    product_type: str = "DISP_NISAR_HISTORICAL",
+) -> None:
+    """Assert compressed SLCs don't conflict with the real GSLC dates.
+
+    Applies in every processing mode, whenever compressed SLCs (CCSLCs) are
+    present. A CCSLC's reference date must not collide with a real GSLC's
+    acquisition date, and must not reach past the real GSLCs it is paired with.
+    Both would otherwise crash deep in the workflow with a pydantic
+    ValidationError from dolphin's ministack construction.
+    No-ops if there are no compressed SLCs in `input_file_list`.
+
+    A compressed SLC is named ``compressed_<ref>_<start>_<end>``, so
+    ``get_dates`` returns ``(reference_date, start_date, end_date)``.
+
+    Parameters
+    ----------
+    input_file_list : Sequence[Path]
+        The input GSLC file list (``cfg.cslc_file_list``).
+    product_type : str
+        ``pge_runconfig.primary_executable.product_type``. Forward mode only
+        outputs a product for the latest date, so the CCSLC need only predate
+        that date. Any other value gets the stricter (historical) behavior: the
+        CCSLC must predate the *earliest* real date.
+
+    Raises
+    ------
+    InputValidationError
+        If a real GSLC shares a date with the most recent compressed SLC
+        reference date (1001), or a compressed SLC's reference date is later than
+        allowed for `product_type` (1002).
+
+    """
+    is_compressed = ["compressed" in str(f).lower() for f in input_file_list]
+    compressed = [f for f, c in zip(input_file_list, is_compressed) if c]
+    if not compressed:
+        return
+    non_compressed = [f for f, c in zip(input_file_list, is_compressed) if not c]
+
+    # A path that merely contains "compressed" (e.g. a real GSLC staged under a
+    # directory of that name) yields fewer than 3 dates; it isn't a CCSLC to
+    # validate, and must not crash this check with an uncoded IndexError.
+    ranges = [
+        dates[:3] for dates in (get_dates(f) for f in compressed) if len(dates) >= 3
+    ]
+    real_dates = {get_dates(f)[0] for f in non_compressed}
+    if not ranges or not real_dates:
+        return
+    ref_date, _start_date, _end_date = max(ranges, key=lambda r: r[2])
+
+    if ref_date in real_dates:
+        raise InputValidationError(
+            f"Input GSLC list has a real GSLC on {ref_date:%Y-%m-%d}, the same date"
+            " as the most recent CCSLC reference date. The CCSLC already represents"
+            " that epoch, so no real GSLC for the same date should also be"
+            " included.",
+            error_code=1001,
+        )
+
+    is_forward = product_type == "DISP_NISAR_FORWARD"
+    boundary_date = max(real_dates) if is_forward else min(real_dates)
+    if ref_date > boundary_date:
+        if is_forward:
+            summary = (
+                "CCSLC reference date is later than the latest real GSLC (the"
+                " latest acquisition must always be real)"
+            )
+        else:
+            summary = (
+                "CCSLC reference date is later than the earliest real GSLC"
+                " (historical mode outputs a product for every real date, so"
+                " CCSLCs must cover only prior history)"
+            )
+        raise InputValidationError(
+            f"{summary}: CCSLC reference date {ref_date:%Y-%m-%d}, "
+            f"real GSLC date {boundary_date:%Y-%m-%d}",
+            error_code=1002,
+        )
+
+
+def _assert_forward_mode_compressed(input_file_list: Sequence[Path]) -> None:
+    """Assert forward-mode inputs include at least one compressed SLC.
+
+    Forward mode is incremental, so it must be passed a compressed SLC (CCSLC)
+    summarizing the prior ministack. Historical mode has no such requirement.
+
+    Raises
+    ------
+    InputValidationError
+        If no compressed SLC is present (error_code=2000).
+
+    """
+    if not any("compressed" in str(f).lower() for f in input_file_list):
+        raise InputValidationError(
+            "Forward mode requires at least one compressed GSLC (CCSLC) in the"
+            " input GSLC list, but none was found.",
+            error_code=2000,
+        )
 
 
 def _get_near_far_incidence_angles(geometry_file: Path) -> tuple[float, float]:
