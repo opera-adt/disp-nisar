@@ -160,3 +160,59 @@ def test_nodata_mask_keeps_exact_zero_pixels():
     assert mask.tolist() == [[False, False], [True, False]]
     # No mask at all -> nothing is nodata, even where the values are zero
     assert not product.nodata_mask(np.ma.masked_array(np.zeros((2, 2)))).any()
+
+
+def test_compressed_slc_stores_combined_mask(tmp_path):
+    """The compressed SLC stores the combined input mask as a GSLC-style `mask`."""
+    import numpy as np
+    from dolphin import io
+
+    from disp_nisar._masking import combine_gslc_masks, read_gslc_validity_mask
+
+    xsize, ysize = io.get_raster_xysize(TEST_OUTPUT_CGSLC_FILE)
+    gt = io.get_raster_gt(TEST_OUTPUT_CGSLC_FILE)
+    epsg = io.get_raster_crs(TEST_OUTPUT_CGSLC_FILE).to_epsg()
+
+    def make_input(name, mask):
+        path = tmp_path / name
+        with h5py.File(path, "w") as hf:
+            g = hf.create_group("science/LSAR/GSLC/grids/frequencyA")
+            g["mask"] = mask
+            g["xCoordinates"] = gt[0] + gt[1] * (np.arange(xsize) + 0.5)
+            g["yCoordinates"] = gt[3] + gt[5] * (np.arange(ysize) + 0.5)
+            g["projection"] = np.int32(epsg)
+        return path
+
+    m1 = np.ones((ysize, xsize), dtype="uint8")
+    m1[:5, :] = 0
+    m2 = np.ones((ysize, xsize), dtype="uint8")
+    m2[:, :7] = 255
+    # The first input has the date of the compressed SLC, so its metadata is copied
+    in1 = make_input("NISAR_L2_GSLC_NI_F150_20060630T061920Z_20240504T181714Z.h5", m1)
+    in2 = make_input("NISAR_L2_GSLC_NI_F150_20060712T061920Z_20240504T181714Z.h5", m2)
+
+    [out] = product.create_compressed_products(
+        {"": [TEST_OUTPUT_CGSLC_FILE]},
+        cslc_file_list=[in1, in2],
+        output_dir=tmp_path,
+    )
+    # Not left behind in the output directory
+    assert not list(tmp_path.glob(".mask_*"))
+
+    with h5py.File(out) as hf:
+        stored = hf["/science/LSAR/GSLC/grids/frequencyA/mask"][:]
+    expected = np.ones((ysize, xsize), dtype="uint8")
+    expected[:5, :] = 0
+    expected[:, :7] = 0
+    np.testing.assert_array_equal(stored >= 1, expected.astype(bool))
+    assert stored.dtype == np.uint8
+
+    # Read back like a GSLC mask, and combine it with a new acquisition in the next run
+    np.testing.assert_array_equal(read_gslc_validity_mask(out).values, expected)
+    m3 = np.ones((ysize, xsize), dtype="uint8")
+    m3[-1, :] = 0
+    in3 = make_input("NISAR_L2_GSLC_NI_F150_20060724T061920Z_20240504T181714Z.h5", m3)
+    nxt = combine_gslc_masks([in3, out]).values
+    expected_next = expected.copy()
+    expected_next[-1, :] = 0
+    np.testing.assert_array_equal(nxt, expected_next)
