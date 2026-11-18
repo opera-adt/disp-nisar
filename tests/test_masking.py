@@ -62,8 +62,7 @@ def test_combine_gslc_masks_is_intersection(tmp_path):
     c = np.ones((6, 8), dtype="uint8")
     c[3, 3] = 0
     files = [
-        _write_gslc_with_mask(tmp_path / f"{n}.h5", m)
-        for n, m in zip("abc", (a, b, c))
+        _write_gslc_with_mask(tmp_path / f"{n}.h5", m) for n, m in zip("abc", (a, b, c))
     ]
 
     combined = combine_gslc_masks(files)

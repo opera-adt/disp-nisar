@@ -272,7 +272,8 @@ def test_gslc_dataset_name():
     assert gslc_dataset_name() == NISAR_DATASET_NAME
     assert NISAR_DATASET_NAME == "/science/LSAR/GSLC/grids/frequencyA/HH"
     assert (
-        gslc_dataset_name("frequencyB", "VV") == "/science/LSAR/GSLC/grids/frequencyB/VV"
+        gslc_dataset_name("frequencyB", "VV")
+        == "/science/LSAR/GSLC/grids/frequencyB/VV"
     )
     # Enums (as stored in some configs) give the same result as the strings
     assert gslc_dataset_name(ImagingFrequency.B, Polarization.HV) == gslc_dataset_name(
