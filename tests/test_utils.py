@@ -263,3 +263,19 @@ def test_frequency_to_wavelength():
     # L-band center frequency ~1.27 GHz -> wavelength ~0.236 m
     expected = SPEED_OF_LIGHT / 1269999750.0604727
     assert abs(wavelength - expected) < 1e-6
+
+
+def test_gslc_dataset_name():
+    from disp_nisar._common import NISAR_DATASET_NAME, gslc_dataset_name
+    from disp_nisar.enums import ImagingFrequency, Polarization
+
+    assert gslc_dataset_name() == NISAR_DATASET_NAME
+    assert NISAR_DATASET_NAME == "/science/LSAR/GSLC/grids/frequencyA/HH"
+    assert (
+        gslc_dataset_name("frequencyB", "VV")
+        == "/science/LSAR/GSLC/grids/frequencyB/VV"
+    )
+    # Enums (as stored in some configs) give the same result as the strings
+    assert gslc_dataset_name(ImagingFrequency.B, Polarization.HV) == gslc_dataset_name(
+        "frequencyB", "HV"
+    )

@@ -60,7 +60,7 @@ except ImportError:
 from pydantic import ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from ._common import NISAR_DATASET_NAME
+from ._common import NISAR_DATASET_NAME, gslc_dataset_name
 from ._log import InputValidationError
 from ._utils import _frequency_to_wavelength, get_nisar_frame_bbox
 from .enums import ImagingFrequency, Polarization, ProcessingMode
@@ -540,7 +540,7 @@ class RunConfig(YamlModel):
         polarization = self.input_file_group.polarization
         if not isinstance(polarization, str):
             polarization = polarization.value
-        nisar_dataset_name = f"/science/LSAR/GSLC/grids/{frequency}/{polarization}"
+        nisar_dataset_name = gslc_dataset_name(frequency, polarization)
 
         # Load the algorithm parameters from the file
         algorithm_parameters = AlgorithmParameters.from_yaml(algorithm_parameters_file)

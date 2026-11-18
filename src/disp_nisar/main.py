@@ -19,11 +19,11 @@ from dolphin.workflows.config import DisplacementWorkflow
 from dolphin.workflows.displacement import OutputPaths
 from dolphin.workflows.displacement import run as run_displacement
 from opera_utils import get_dates, group_by_date
-from opera_utils.nisar import get_gslc_mask
 
 from disp_nisar import __version__, product
 from disp_nisar._log import InputValidationError
 from disp_nisar._masking import (
+    combine_gslc_masks,
     create_mask_from_distance,  # , create_layover_shadow_masks
 )
 from disp_nisar._ps import precompute_ps
@@ -118,25 +118,27 @@ def run(
         cfg.cslc_file_list[0],
     )
 
-    # Create GSLC mask first (in native GSLC CRS - UTM)
+    # Create GSLC mask first (in native GSLC CRS - UTM).
+    # The mask differs between acquisitions, so combine the masks of all the inputs
+    # (real GSLCs, and the compressed SLCs, which store the mask of what they cover).
     gslc_mask_file = cfg.work_directory / "gslc_mask.tif"
 
     try:
-        logger.info(f"Creating GSLC mask from {first_non_compressed}")
-        gslc_mask = get_gslc_mask(
-            first_non_compressed,
+        # Real GSLCs first: the first one sets the grid of the combined mask
+        mask_inputs = sorted(
+            cfg.cslc_file_list, key=lambda f: "compressed" in f.name.lower()
+        )
+        logger.info(f"Creating GSLC mask from {len(mask_inputs)} inputs")
+        strides_dict = cfg.output_options.strides.model_dump()
+        gslc_mask_strided = combine_gslc_masks(
+            mask_inputs,
             frequency=(
                 pge_runconfig.input_file_group.frequency
                 if isinstance(pge_runconfig.input_file_group.frequency, str)
                 else pge_runconfig.input_file_group.frequency.value
             ),
+            strides=(strides_dict["y"], strides_dict["x"]),
         )
-        strides_dict = cfg.output_options.strides.model_dump()
-        gslc_mask_strided = gslc_mask.isel(
-            y=slice(None, None, strides_dict["y"]),
-            x=slice(None, None, strides_dict["x"]),
-        )
-        del gslc_mask
         # Save the xarray DataArray as GeoTIFF in native GSLC CRS
         gslc_mask_strided.rio.to_raster(
             gslc_mask_file, compress="LZW", tiled=True, blockxsize=256, blockysize=256

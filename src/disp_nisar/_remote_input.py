@@ -25,6 +25,11 @@ from opera_utils import is_remote_url
 from opera_utils._types import PathOrStr
 from tenacity import retry, stop_after_attempt, wait_fixed
 
+from ._common import (
+    NISAR_GSLC_GRIDS_GROUP,
+    NISAR_GSLC_PARAMETERS_GROUP,
+    gslc_dataset_name,
+)
 from ._streaming import S3Path
 
 logger = logging.getLogger(__name__)
@@ -36,7 +41,6 @@ _ALWAYS_KEEP_GROUPS = (
     "/science/LSAR/GSLC/metadata/radarGrid",
     "/science/LSAR/GSLC/metadata/orbit",
     "/science/LSAR/GSLC/metadata/sourceData/swaths",
-    "/science/LSAR/GSLC/metadata/sourceData/processingInformation/parameters/frequencyA",
 )
 
 # Groups copied wholesale for gunw.
@@ -100,12 +104,18 @@ def _extract_subset(
             for k, v in src.attrs.items():
                 dst.attrs[k] = v
 
-            for grp in _ALWAYS_KEEP_GROUPS:
+            # Frequency-agnostic groups, then the processing parameters of each
+            # requested frequency
+            keep_groups = (
+                *_ALWAYS_KEEP_GROUPS,
+                *(f"{NISAR_GSLC_PARAMETERS_GROUP}/{fr}" for fr in frequencies),
+            )
+            for grp in keep_groups:
                 if grp in src and grp not in dst:
                     src.copy(grp, dst, name=grp)
 
             for frequency in frequencies:
-                grid = f"/science/LSAR/GSLC/grids/{frequency}"
+                grid = f"{NISAR_GSLC_GRIDS_GROUP}/{frequency}"
                 # Order matters: aux/coord datasets first so dimension scales exist
                 # before the polarization dataset is copied.
                 for name in (*_GRID_AUX_DATASETS, polarization):
@@ -287,7 +297,7 @@ def _strip_slc_arrays(path: Path, frequencies: Sequence[str], polarization: str)
 
     Returns the number of bytes reclaimed (0 if no SLC array was present).
     """
-    drop = {f"/science/LSAR/GSLC/grids/{fr}/{polarization}" for fr in frequencies}
+    drop = {gslc_dataset_name(fr, polarization) for fr in frequencies}
     with h5py.File(path, "r") as src:
         present = [p for p in drop if p in src]
     if not present:
@@ -315,7 +325,7 @@ def _strip_slc_arrays(path: Path, frequencies: Sequence[str], polarization: str)
         # The coordinate datasets carry dimension-scale references to the now
         # removed SLC; drop them so the new file has no dangling references.
         for fr in frequencies:
-            grid = f"/science/LSAR/GSLC/grids/{fr}"
+            grid = f"{NISAR_GSLC_GRIDS_GROUP}/{fr}"
             for coord in ("xCoordinates", "yCoordinates"):
                 p = f"{grid}/{coord}"
                 if p in dst:

@@ -637,3 +637,21 @@ def test_algorithm_parameters_anchor_not_settable():
 def test_run_input_prechecks_default_on(runconfig_minimum):
     """Prechecks are on by default, including when the key is absent from YAML."""
     assert runconfig_minimum.run_input_prechecks is True
+
+
+@pytest.mark.parametrize(
+    ("frequency", "polarization"), [("frequencyA", "HH"), ("frequencyB", "VV")]
+)
+def test_subdataset_follows_config(
+    runconfig_minimum, monkeypatch, frequency, polarization
+):
+    """`input_options.subdataset` is built from the configured frequency/pol."""
+    monkeypatch.setattr(
+        pge_runconfig, "_frequency_to_wavelength", lambda *_a, **_k: 0.24
+    )
+    runconfig_minimum.input_file_group.polarization = polarization
+    cfg = runconfig_minimum.to_workflow(frequency=frequency)
+    assert (
+        cfg.input_options.subdataset
+        == f"/science/LSAR/GSLC/grids/{frequency}/{polarization}"
+    )
