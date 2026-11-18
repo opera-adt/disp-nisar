@@ -717,6 +717,9 @@ def _create_identification_group(
 ) -> None:
     """Create the identification group in the output file."""
     logger.info("Creating /identification group in %s", output_name)
+    # The displacement is made from the configured input polarization
+    polarization = pge_runconfig.input_file_group.polarization
+    polarization = getattr(polarization, "value", polarization)
     with h5netcdf.File(output_name, "a") as f:
         identification_group = f.create_group(IDENTIFICATION_GROUP_NAME)
         _create_dataset(
@@ -1037,7 +1040,7 @@ def _create_identification_group(
             group=identification_group,
             name="source_data_polarization",
             dimensions=(),
-            data="HH",
+            data=polarization,
             fillvalue=None,
             description="Radar polarization of input products used",
             attrs={"units": "unitless"},
@@ -1164,7 +1167,7 @@ def _create_identification_group(
             group=identification_group,
             name="product_data_polarization",
             dimensions=(),
-            data="VV",
+            data=polarization,
             fillvalue=None,
             description="Radar polarization of displacement products",
         )

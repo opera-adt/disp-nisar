@@ -216,3 +216,41 @@ def test_compressed_slc_stores_combined_mask(tmp_path):
     expected_next = expected.copy()
     expected_next[-1, :] = 0
     np.testing.assert_array_equal(nxt, expected_next)
+
+
+@pytest.mark.parametrize("polarization", ["HH", "VV", "HV"])
+def test_identification_polarization_follows_config(tmp_path, polarization):
+    """Input and output polarization in the product come from the configured one."""
+    import datetime
+    from types import SimpleNamespace
+
+    runconfig = SimpleNamespace(
+        input_file_group=SimpleNamespace(
+            frame_id=150,
+            polarization=polarization,
+            gslc_file_list=[TEST_GSLC_FILE],
+        ),
+        product_path_group=SimpleNamespace(product_version="0.1"),
+    )
+    out = tmp_path / "id.nc"
+    t = datetime.datetime(2024, 1, 1)
+    product._create_identification_group(
+        output_name=out,
+        pge_runconfig=runconfig,
+        radar_wavelength=0.24,
+        reference_orbit_type="precise",
+        secondary_orbit_type="precise",
+        reference_start_time=t,
+        reference_end_time=t,
+        secondary_start_time=t,
+        secondary_end_time=t,
+        footprint_wkt="",
+        product_bounds=(0.0, 0.0, 1.0, 1.0),
+        num_nodata_pixels=0,
+        average_temporal_coherence=0.9,
+        processing_start_datetime=t,
+    )
+    with h5py.File(out) as hf:
+        grp = hf[product.IDENTIFICATION_GROUP_NAME]
+        for name in ("source_data_polarization", "product_data_polarization"):
+            assert grp[name][()].decode() == polarization
