@@ -13,7 +13,7 @@ from dolphin.utils import DummyProcessPoolExecutor
 from dolphin.workflows.config import DisplacementWorkflow
 from dolphin.workflows.wrapped_phase import _get_mask
 
-from ._common import AMPLITUDE_DISPERSION_DSET
+from ._common import AMPLITUDE_DISPERSION_DSET, NISAR_DATASET_NAME
 from ._streaming import XarrayStackReader, is_remote_url
 
 logger = logging.getLogger(__name__)
@@ -180,7 +180,7 @@ def run_combine(
     compressed_slc_files: list[PathOrStr],
     num_slc: int,
     weight_scheme: WeightScheme = WeightScheme.EXPONENTIAL,
-    subdataset: str = "/science/LSAR/GSLC/grids/frequencyA/HH",
+    subdataset: str = NISAR_DATASET_NAME,
     n_workers: int | None = None,
 ) -> tuple[Path, Path]:
     out_dispersion = cur_dispersion.parent / "combined_dispersion.tif"
