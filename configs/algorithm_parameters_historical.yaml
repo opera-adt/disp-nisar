@@ -372,3 +372,33 @@ forward_mode_network_size: 3
 # Number of output products to create in parallel.
 #   Type: integer.
 num_parallel_products: 4
+
+# Read from the MAIN algorithm file, not the frequency-B algorithm file.
+# The runconfig points here through dynamic_ancillary_file_group.algorithm_parameters_file.
+ionosphere_options:
+  method: main_side
+  smooth_sigma_m: 400.0  # Fallback if filtering.sigma_m is null.
+  mask_erosion_px: 3    # Fallback if filtering.donor_erosion_px is null.
+  filtering:
+    # isce3: guide filter -> fill -> restore original valid -> final filter.
+    # smooth_iono: existing nearest-fill + Gaussian implementation.
+    # donor_only: retain the previous bounded original-donor filter.
+    method: isce3
+    sigma_m: [300.0, 300.0]  # (row, column), Gaussian standard deviations in meters.
+    kernel_size_px: null    # Optional positive odd (row, column) lengths.
+    truncate: 4.0
+    iterations: 1
+    guide_filter_method: median_gaussian  # median_gaussian | gaussian | none
+    guide_median_size: 3
+    filling_method: nearest  # nearest | linear (nearest outside convex hull)
+    outlier_threshold: 3.5   # null disables rejection; rejected samples stay excluded.
+    outlier_min_scale_rad: 0.1
+    std_floor_rad: 0.05
+    donor_erosion_px: [0, 3]
+    restore_mask: false      # true restores donor gaps after filtering.
+    # donor_only-specific settings; not gap limits for isce3/smooth_iono.
+    max_fill_m: 600.0
+    min_support: 0.10
+    robust_passes: 1
+    robust_cutoff: 4.0
+    robust_floor_rad: 0.10

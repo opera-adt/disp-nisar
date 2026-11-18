@@ -178,6 +178,7 @@ def estimate_pair_ionosphere(
     smooth_sigma: float = 0.0,
     nodata_A: float = 0.0,
     nodata_B: float = 0.0,
+    donor_path: str | Path | None = None,
 ) -> dict:
     """Estimate ionosphere for one date-pair from freqA and freqB displacements.
 
