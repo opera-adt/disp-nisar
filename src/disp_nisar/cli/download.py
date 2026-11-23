@@ -18,7 +18,6 @@ from disp_nisar._dem import stage_dem as stage_dem
 # )
 
 
-
 def _nisar_frame_bbox_lonlat(frame_id: int) -> Bbox:
     """Get the lon/lat bounds of a NISAR frame from the NISAR frame database."""
     from pyproj import Transformer
