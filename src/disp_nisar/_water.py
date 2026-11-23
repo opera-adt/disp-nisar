@@ -448,19 +448,12 @@ def create_water_mask(
 
     # Get bounding box from frame if needed
     elif frame_id is not None:
-        try:
-            import opera_utils
+        from disp_nisar.pge_runconfig import _get_frame_bbox
 
-            logger.info(f"Retrieving bounding box for frame {frame_id}")
-            epsg, bounds = opera_utils.get_frame_bbox(frame_id=frame_id)
-            t = Transformer.from_crs(epsg, 4326, always_xy=True)
-            bbox = t.transform_bounds(*bounds)
-        except Exception as e:
-            raise ValueError(
-                f"Failed to get bbox for frame {frame_id}. "
-                "For NISAR, provide bbox directly instead. "
-                f"Error: {e}"
-            )
+        logger.info(f"Retrieving bounding box for NISAR frame {frame_id}")
+        epsg, bounds = _get_frame_bbox(None, frame_id)
+        t = Transformer.from_crs(epsg, 4326, always_xy=True)
+        bbox = t.transform_bounds(*bounds)
 
     logger.info(f"Processing bounding box: {bbox}")
     logger.info(f"Using S3 data from: {MASK_S3_URL}")

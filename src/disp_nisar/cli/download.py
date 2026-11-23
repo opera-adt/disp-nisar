@@ -4,7 +4,6 @@ import functools
 from pathlib import Path
 
 import click
-import opera_utils
 from dolphin import Bbox
 
 # from opera_utils import get_burst_ids_for_frame
@@ -18,6 +17,19 @@ from disp_nisar._dem import stage_dem as stage_dem
 #     download_ionosphere_files,
 # )
 
+
+
+def _nisar_frame_bbox_lonlat(frame_id: int) -> Bbox:
+    """Get the lon/lat bounds of a NISAR frame from the NISAR frame database."""
+    from pyproj import Transformer
+
+    from disp_nisar.pge_runconfig import _get_frame_bbox
+
+    epsg, bounds = _get_frame_bbox(None, frame_id)
+    t = Transformer.from_crs(epsg, 4326, always_xy=True)
+    return Bbox(*t.transform_bounds(*bounds))
+
+
 click.option = functools.partial(click.option, show_default=True)
 
 
@@ -26,7 +38,7 @@ def download_group():
     """Sub-commands for downloading prerequisite data."""
     from dolphin._log import setup_logging
 
-    setup_logging(logger_name="disp_s1")
+    setup_logging(logger_name="disp_nisar")
 
 
 # @download_group.command()
@@ -81,7 +93,7 @@ def download_group():
 
 
 # @download_group.command()
-# @click.option("--frame-id", type=int, help="Sentinel-1 OPERA Frame ID")
+# @click.option("--frame-id", type=int, help="NISAR frame ID")
 # @click.option(
 #     "--output-dir",
 #     "-o",
@@ -145,7 +157,7 @@ def download_group():
     default="dem.vrt",
     help="Output DEM filepath (VRT format)",
 )
-@click.option("--frame-id", type=int, help="Sentinel-1 OPERA Frame ID")
+@click.option("--frame-id", type=int, help="NISAR frame ID")
 @click.option(
     "-b", "--bbox", type=float, nargs=4, help="Bounding box (WSEN, decimal degrees)"
 )
@@ -174,11 +186,7 @@ def dem(
     if frame_id is not None:
         if bbox is not None:
             raise ValueError("Only may provide --frame-id or --bbox")
-        # bbox = opera_utils.get_frame_bbox(frame_id=frame_id)
-        utm_epsg, utm_bounds = opera_utils.get_frame_bbox(frame_id=frame_id)
-        bbox = opera_utils.reproject_bounds(
-            utm_bounds, src_epsg=utm_epsg, dst_epsg=4326
-        )
+        bbox = _nisar_frame_bbox_lonlat(frame_id)
 
     return stage_dem(
         output=output,
@@ -198,7 +206,7 @@ def dem(
     default="water_binary_mask.tif",
     help="Output water mask filepath",
 )
-@click.option("--frame-id", type=int, help="Frame ID to get bbox from")
+@click.option("--frame-id", type=int, help="NISAR frame ID")
 @click.option(
     "-b", "--bbox", type=float, nargs=4, help="Bounding box (WSEN, decimal degrees)"
 )
@@ -214,14 +222,14 @@ def dem(
 @click.option(
     "--land-buffer",
     type=int,
-    default=1,
-    help="Buffer in km for land water regions (lakes, rivers)",
+    default=0,
+    help="Buffer in km for land water regions (reduces masking)",
 )
 @click.option(
     "--ocean-buffer",
     type=int,
-    default=1,
-    help="Buffer in km for ocean water regions",
+    default=0,
+    help="Buffer in km for ocean water regions (reduces masking)",
 )
 @click.option(
     "--aws-profile",
