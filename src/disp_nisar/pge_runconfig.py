@@ -356,6 +356,16 @@ class AlgorithmParameters(YamlModel):
     num_parallel_products: int = Field(
         3, description="Number of output products to create in parallel."
     )
+    use_qfsp_mask: bool = Field(
+        False,
+        description=(
+            "Whether to use the QFSP mask (`inputDataExceptionMask` in each GSLC,"
+            " where 0 marks an invalid pixel). If true, the layer is kept when"
+            " staging remote GSLCs, combined over all inputs and intersected with"
+            " the GSLC and water masks for processing, and stored in the compressed"
+            " SLCs. If false, it is ignored everywhere."
+        ),
+    )
     forward_mode_network_size: int = Field(
         3,
         ge=3,

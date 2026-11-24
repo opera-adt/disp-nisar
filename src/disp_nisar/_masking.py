@@ -11,7 +11,7 @@ from dolphin.io import format_nc_filename, load_gdal, write_arr
 # from opera_utils import group_by_burst
 from scipy import ndimage
 
-from ._common import GSLC_MASK_DSET
+from ._common import GSLC_EXCEPTION_MASK_DSET, GSLC_MASK_DSET
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +227,51 @@ def read_gslc_validity_mask(
     ).rio.write_crs(f"EPSG:{epsg}")
 
 
+def read_gslc_exception_mask(
+    gslc_file: PathOrStr,
+    frequency: str = "frequencyA",
+    strides: tuple[int, int] = (1, 1),
+) -> xr.DataArray:
+    """Read the input-data-exception (QFSP) mask of a GSLC on its native grid.
+
+    Compressed SLCs store an `inputDataExceptionMask` too (the combined mask of the
+    inputs they cover), so this reads both. In the dataset, 0 marks an invalid pixel;
+    any other value is treated as valid.
+
+    Parameters
+    ----------
+    gslc_file : PathOrStr
+        Path to the GSLC HDF5 file. Can be remote.
+    frequency : str
+        Frequency layer to read, e.g. "frequencyA".
+    strides : tuple[int, int]
+        (row, column) strides applied while reading.
+
+    Returns
+    -------
+    xr.DataArray
+        uint8 array with 1 where the pixel is valid and 0 elsewhere, with CRS and
+        coordinates attached.
+
+    """
+    from ._streaming import open_h5_file
+
+    sy, sx = strides
+    with open_h5_file(gslc_file, "r") as f:
+        grp = f[f"science/LSAR/GSLC/grids/{frequency}"]
+        raw = grp[GSLC_EXCEPTION_MASK_DSET][::sy, ::sx]
+        x = grp["xCoordinates"][::sx]
+        y = grp["yCoordinates"][::sy]
+        epsg = int(grp["projection"][()])
+
+    return xr.DataArray(
+        (raw != 0).astype(np.uint8),
+        dims=("y", "x"),
+        coords={"y": y, "x": x},
+        attrs={"long_name": "input data exception (QFSP) valid mask"},
+    ).rio.write_crs(f"EPSG:{epsg}")
+
+
 def _mask_values_on_grid(mask: xr.DataArray, ref: xr.DataArray) -> np.ndarray:
     """Get the values of `mask` on the grid of `ref`.
 
@@ -256,6 +301,7 @@ def combine_gslc_masks(
     gslc_files: Sequence[PathOrStr],
     frequency: str = "frequencyA",
     strides: tuple[int, int] = (1, 1),
+    reader=read_gslc_validity_mask,
 ) -> xr.DataArray:
     """Combine the validity masks of all inputs into one.
 
@@ -275,6 +321,10 @@ def combine_gslc_masks(
         Frequency layer to read, e.g. "frequencyA".
     strides : tuple[int, int]
         (row, column) strides applied while reading.
+    reader : callable
+        Function `(file, frequency, strides) -> xr.DataArray` reading one input's
+        mask. Default reads the `mask` dataset; use `read_gslc_exception_mask` for
+        the QFSP `inputDataExceptionMask`.
 
     Returns
     -------
@@ -291,7 +341,7 @@ def combine_gslc_masks(
     num_used = 0
     for f in gslc_files:
         try:
-            mask = read_gslc_validity_mask(f, frequency=frequency, strides=strides)
+            mask = reader(f, frequency=frequency, strides=strides)
         except Exception as e:
             logger.warning(f"Could not read the mask of {f}: {e}; skipping it")
             continue

@@ -58,6 +58,9 @@ _GRID_AUX_DATASETS = (
     "mask",
 )
 
+# Optional per-frequency grid dataset: the QFSP mask (see `use_qfsp_mask`)
+_GRID_QFSP_DATASETS = ("inputDataExceptionMask",)
+
 # Per-frequency grid datasets kept besides the chosen polarization for gunw.
 _GRID_AUX_DATASETS_GUNW = (
     "projection",
@@ -85,7 +88,11 @@ def _normalize_url(url: str) -> str:
 
 
 def _extract_subset(
-    src_path: Path, dst_path: Path, frequencies: Sequence[str], polarization: str
+    src_path: Path,
+    dst_path: Path,
+    frequencies: Sequence[str],
+    polarization: str,
+    use_qfsp_mask: bool = True,
 ) -> None:
     """Locally copy only the needed datasets/groups into a smaller file.
 
@@ -98,6 +105,9 @@ def _extract_subset(
     ``frequencyB`` for split-spectrum ionosphere) — each frequency's grid is
     copied into the same staged file while the frequency-agnostic metadata
     groups are copied only once.
+
+    The QFSP mask (`inputDataExceptionMask`) of a GSLC is kept only if
+    ``use_qfsp_mask`` is true.
     """
     if "GSLC" in str(src_path):
         with h5py.File(src_path, "r") as src, h5py.File(dst_path, "w") as dst:
@@ -118,7 +128,11 @@ def _extract_subset(
                 grid = f"{NISAR_GSLC_GRIDS_GROUP}/{frequency}"
                 # Order matters: aux/coord datasets first so dimension scales exist
                 # before the polarization dataset is copied.
-                for name in (*_GRID_AUX_DATASETS, polarization):
+                aux_names = (
+                    *_GRID_AUX_DATASETS,
+                    *(_GRID_QFSP_DATASETS if use_qfsp_mask else ()),
+                )
+                for name in (*aux_names, polarization):
                     src_path_h5 = f"{grid}/{name}"
                     if src_path_h5 in src and src_path_h5 not in dst:
                         src.copy(src_path_h5, dst, name=src_path_h5)
@@ -380,6 +394,7 @@ def _download_and_trim(
     raw_dir: Path,
     frequencies: Sequence[str],
     polarization: str,
+    use_qfsp_mask: bool = True,
 ) -> Path:
     """Download one granule then extract the subset; remove the full download."""
     import earthaccess
@@ -398,7 +413,7 @@ def _download_and_trim(
 
     tmp = final.with_suffix(final.suffix + ".part")
     logger.info(f"Extracting {polarization}@{','.join(frequencies)} from {fname}")
-    _extract_subset(raw, tmp, frequencies, polarization)
+    _extract_subset(raw, tmp, frequencies, polarization, use_qfsp_mask)
     tmp.replace(final)
 
     # Free disk: drop the full granule once the trimmed copy is in place.
@@ -419,6 +434,7 @@ def parallel_s3_download(
     frequencies: Sequence[str],
     polarization: str,
     max_workers: int = 5,
+    use_qfsp_mask: bool = True,
 ) -> list[Path]:
     """Download using an authorized Boto client in parallel."""
     max_workers = min(len(s3_urls), max_workers)
@@ -441,6 +457,7 @@ def parallel_s3_download(
                 raw_dir,
                 frequencies,
                 polarization,
+                use_qfsp_mask,
             )
             future_to_url[future] = url
 
@@ -463,6 +480,7 @@ def _download_file(
     raw_dir: Path,
     frequencies: Sequence[str],
     polarization: str,
+    use_qfsp_mask: bool = True,
 ) -> Path:
     s3_path = S3Path(url)
     logger.info(f"Downloading {s3_path} to {output_dir}")
@@ -484,7 +502,7 @@ def _download_file(
 
     tmp = final.with_suffix(final.suffix + ".part")
     logger.info(f"Extracting {polarization}@{','.join(frequencies)} from {raw}")
-    _extract_subset(raw, tmp, frequencies, polarization)
+    _extract_subset(raw, tmp, frequencies, polarization, use_qfsp_mask)
     tmp.replace(final)
 
     # Free disk: drop the full granule once the trimmed copy is in place.
@@ -514,6 +532,7 @@ def download_and_subset_from_private_bucket(
     num_workers: int = 4,
     per_file_concurrency: int = 8,
     aws_profile: str | None = None,
+    use_qfsp_mask: bool = True,
 ) -> list:
     """Download each ``s3://bucket/key`` URL, subset it, delete the original.
 
@@ -585,7 +604,9 @@ def download_and_subset_from_private_bucket(
         try:
             with repack_lock:
                 if local.exists():
-                    _extract_subset(local, dst, frequencies, polarization)
+                    _extract_subset(
+                        local, dst, frequencies, polarization, use_qfsp_mask
+                    )
         except Exception as e:  # noqa: BLE001
             dst.unlink(missing_ok=True)  # drop partial subset
             # Keep the original so the repack can be retried without re-downloading.
@@ -628,6 +649,7 @@ def stage_remote_inputs(
     frequencies: Sequence[str] = ("frequencyA",),
     polarization: str = "HH",
     n_workers: int = 6,
+    use_qfsp_mask: bool = True,
 ) -> list[Path]:
     """Download remote NISAR GSLCs (parallel) then trim each to needed layers.
 
@@ -647,6 +669,8 @@ def stage_remote_inputs(
         Polarization to keep (``"HH"``, ``"HV"``, ``"VV"``, ``"VH"``).
     n_workers : int
         Parallel download+trim workers.
+    use_qfsp_mask : bool
+        Whether to keep the QFSP mask (`inputDataExceptionMask`) of each GSLC.
 
     """
     import earthaccess
@@ -690,6 +714,7 @@ def stage_remote_inputs(
                     raw_dir,
                     frequencies,
                     polarization,
+                    use_qfsp_mask,
                 ): i
                 for i in remote_indices
             }
@@ -703,6 +728,7 @@ def stage_remote_inputs(
             output_dir=scratch_dir,
             frequencies=frequencies,
             polarization=polarization,
+            use_qfsp_mask=use_qfsp_mask,
         )
     else:
         out_paths = parallel_s3_download(
@@ -712,6 +738,7 @@ def stage_remote_inputs(
             frequencies=frequencies,
             polarization=polarization,
             max_workers=n_workers,
+            use_qfsp_mask=use_qfsp_mask,
         )
 
     # Best-effort cleanup of the empty raw dir.
@@ -730,9 +757,12 @@ def run_dolphin(
 ) -> None:
     """Run the disp-nisar workflow, pre-staging any remote GSLC inputs."""
     from disp_nisar.main import run
-    from disp_nisar.pge_runconfig import RunConfig
+    from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
     pge_runconfig = RunConfig.from_yaml(str(config_file))
+    use_qfsp_mask = AlgorithmParameters.from_yaml(
+        pge_runconfig.dynamic_ancillary_file_group.algorithm_parameters_file
+    ).use_qfsp_mask
 
     scratch_gslc_dir = pge_runconfig.product_path_group.scratch_path / "gslc"
     scratch_gunw_dir = pge_runconfig.product_path_group.scratch_path / "gunw"
@@ -761,6 +791,7 @@ def run_dolphin(
             frequencies=frequencies,
             polarization=polarization,
             n_workers=n_workers,
+            use_qfsp_mask=use_qfsp_mask,
         )
         pge_runconfig.input_file_group.gslc_file_list = local_files
     if len(gunw_files) > 0 and any(is_remote_url(f) for f in gunw_files):

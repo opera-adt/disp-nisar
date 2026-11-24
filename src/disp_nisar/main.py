@@ -25,6 +25,7 @@ from disp_nisar._log import InputValidationError
 from disp_nisar._masking import (
     combine_gslc_masks,
     create_mask_from_distance,  # , create_layover_shadow_masks
+    read_gslc_exception_mask,
 )
 from disp_nisar._ps import precompute_ps
 from disp_nisar._reference import ReferencePoint, read_reference_point
@@ -112,6 +113,12 @@ def run(
                 second_to_last_date + timedelta(days=1)
             )
 
+    algorithm_parameters = AlgorithmParameters.from_yaml(
+        pge_runconfig.dynamic_ancillary_file_group.algorithm_parameters_file
+    )
+    # Whether to use the QFSP mask (`inputDataExceptionMask`) of the GSLCs
+    use_qfsp_mask = algorithm_parameters.use_qfsp_mask
+
     # Get the first non-compressed CSLC file for mask generation
     first_non_compressed = next(
         (f for f in cfg.cslc_file_list if "compressed" not in f.name.lower()),
@@ -123,21 +130,22 @@ def run(
     # (real GSLCs, and the compressed SLCs, which store the mask of what they cover).
     gslc_mask_file = cfg.work_directory / "gslc_mask.tif"
 
+    # Real GSLCs first: the first one sets the grid of the combined masks
+    mask_inputs = sorted(
+        cfg.cslc_file_list, key=lambda f: "compressed" in f.name.lower()
+    )
+    strides_dict = cfg.output_options.strides.model_dump()
+    mask_frequency = (
+        pge_runconfig.input_file_group.frequency
+        if isinstance(pge_runconfig.input_file_group.frequency, str)
+        else pge_runconfig.input_file_group.frequency.value
+    )
+    mask_strides = (strides_dict["y"], strides_dict["x"])
+
     try:
-        # Real GSLCs first: the first one sets the grid of the combined mask
-        mask_inputs = sorted(
-            cfg.cslc_file_list, key=lambda f: "compressed" in f.name.lower()
-        )
         logger.info(f"Creating GSLC mask from {len(mask_inputs)} inputs")
-        strides_dict = cfg.output_options.strides.model_dump()
         gslc_mask_strided = combine_gslc_masks(
-            mask_inputs,
-            frequency=(
-                pge_runconfig.input_file_group.frequency
-                if isinstance(pge_runconfig.input_file_group.frequency, str)
-                else pge_runconfig.input_file_group.frequency.value
-            ),
-            strides=(strides_dict["y"], strides_dict["x"]),
+            mask_inputs, frequency=mask_frequency, strides=mask_strides
         )
         # Save the xarray DataArray as GeoTIFF in native GSLC CRS
         gslc_mask_strided.rio.to_raster(
@@ -147,6 +155,32 @@ def run(
     except Exception as e:
         logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
         gslc_mask_file = None
+
+    # Separate QFSP mask (`inputDataExceptionMask`, 0 = invalid), combined over all
+    # the inputs (the compressed SLCs store the combined QFSP mask of what they cover)
+    qfsp_mask_file: Path | None = None
+    if use_qfsp_mask:
+        qfsp_mask_file = cfg.work_directory / "qfsp_mask.tif"
+        try:
+            qfsp_mask_strided = combine_gslc_masks(
+                mask_inputs,
+                frequency=mask_frequency,
+                strides=mask_strides,
+                reader=read_gslc_exception_mask,
+            )
+            qfsp_mask_strided.rio.to_raster(
+                qfsp_mask_file,
+                compress="LZW",
+                tiled=True,
+                blockxsize=256,
+                blockysize=256,
+            )
+            logger.info(f"QFSP mask created at {qfsp_mask_file} in native CRS")
+        except Exception as e:
+            logger.warning(f"Failed to create QFSP mask: {e}; continuing without it")
+            qfsp_mask_file = None
+    else:
+        logger.info("Not using the QFSP mask (`use_qfsp_mask` is false)")
 
     # Setup the water mask and warp to match GSLC CRS
     if pge_runconfig.dynamic_ancillary_file_group.mask_file:
@@ -173,21 +207,24 @@ def run(
     else:
         water_binary_mask = None
 
-    # Combine masks for unwrapping (both in GSLC native CRS)
-    if water_binary_mask is not None and gslc_mask_file is not None:
+    # Combine masks for unwrapping (all in GSLC native CRS)
+    masks_to_combine = [
+        f for f in (gslc_mask_file, qfsp_mask_file, water_binary_mask) if f is not None
+    ]
+    if len(masks_to_combine) > 1:
         combined_mask_file = cfg.work_directory / "water_gslc_combined_mask.tif"
-        logger.info("Combining water mask and GSLC mask for unwrapping")
+        logger.info(
+            "Combining GSLC, QFSP and water masks for unwrapping: %s",
+            [f.name for f in masks_to_combine],
+        )
         _intersect_masks(
-            mask_filenames=[gslc_mask_file, water_binary_mask],
+            mask_filenames=masks_to_combine,
             output_filename=combined_mask_file,
         )
         cfg.mask_file = combined_mask_file
-    elif water_binary_mask is not None:
-        cfg.mask_file = water_binary_mask
-        logger.info("Using water mask for unwrapping")
-    elif gslc_mask_file is not None:
-        cfg.mask_file = gslc_mask_file
-        logger.info("Using GSLC mask for unwrapping")
+    elif masks_to_combine:
+        cfg.mask_file = masks_to_combine[0]
+        logger.info("Using %s for unwrapping", masks_to_combine[0].name)
 
     # Build a layover/shadow mask from the GSLC radarGrid datacubes + DEM.
     # This replaces the OPERA-CSLC nodata-mask path (which doesn't apply to
@@ -618,6 +655,7 @@ def create_products(
             output_dir=output_dir,
             cslc_file_list=cfg.cslc_file_list,
             subdataset=cfg.input_options.subdataset,
+            use_qfsp_mask=algorithm_parameters.use_qfsp_mask,
         )
 
 

@@ -37,11 +37,12 @@ from ._baselines import _interpolate_data, compute_baselines
 from ._common import (
     AMPLITUDE_DISPERSION_DSET,
     DATETIME_FORMAT,
+    GSLC_EXCEPTION_MASK_DSET,
     GSLC_MASK_DSET,
     NISAR_DATASET_NAME,
     NISAR_IDENTIFICATION_GROUP,
 )
-from ._masking import combine_gslc_masks, mask_on_grid
+from ._masking import combine_gslc_masks, mask_on_grid, read_gslc_exception_mask
 from ._reference import ReferencePoint
 from ._streaming import open_h5_file
 from ._utils import extract_footprint
@@ -1815,7 +1816,14 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
     ``<grids/frequencyX>/{<pol>, amplitude_dispersion, xCoordinates, yCoordinates,
     xCoordinateSpacing, yCoordinateSpacing, projection, centerFrequency}``.
     """
-    comp_slc_file, output_dir, opera_cslc_file, subdataset, mask_file = info
+    (
+        comp_slc_file,
+        output_dir,
+        opera_cslc_file,
+        subdataset,
+        mask_file,
+        qfsp_mask_file,
+    ) = info
     date_str = format_dates(*get_dates(comp_slc_file.stem))
 
     name = COMPRESSED_SLC_TEMPLATE.format(date_str=date_str)
@@ -1835,6 +1843,8 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
     metadata_dict = io.get_raster_metadata(comp_slc_file, "DOLPHIN")
     attrs = {"units": "unitless"}
     attrs.update(metadata_dict)
+    # GeoTIFF with the combined QFSP (`inputDataExceptionMask`) mask (1 = valid)
+    qfsp_mask_file: Optional[Path] = None
 
     *parts, dset_name = subdataset.split("/")
     dispersion_dset_name = AMPLITUDE_DISPERSION_DSET
@@ -1977,6 +1987,27 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
             )
         with h5py.File(outname, "a") as hf:
             hf[f"{group_name}/{GSLC_MASK_DSET}"][:] = mask_arr
+        if qfsp_mask_file is not None:
+            # Same dataset name and encoding as a GSLC `inputDataExceptionMask`
+            qfsp_var = data_group.create_variable(
+                GSLC_EXCEPTION_MASK_DSET,
+                dimensions=[y_name, x_name],
+                dtype=np.uint8,
+                fillvalue=0,
+                **HDF5_OPTS,
+            )
+            qfsp_var.attrs.update(
+                {
+                    "long_name": "input data exception (QFSP) mask",
+                    "description": (
+                        "Combined QFSP mask (`inputDataExceptionMask`) of all the"
+                        " inputs used up to this compressed SLC. 1 where valid in"
+                        " every input, 0 elsewhere."
+                    ),
+                    "grid_mapping": grid_mapping_dset_name,
+                }
+            )
+
 
     copy_cslc_metadata_to_compressed(opera_cslc_file, outname, frequency=frequency)
 
@@ -2007,6 +2038,16 @@ def _copy_hdf5_dsets(
             else:
                 out_group = str(Path(dset_path).parent)
             dst.require_group(out_group)
+
+    if qfsp_mask_file is not None:
+        import rioxarray
+
+        with rioxarray.open_rasterio(qfsp_mask_file) as da:
+            qfsp_arr = mask_on_grid(
+                da.squeeze(drop=True), y=y_arr, x=x_arr, crs_wkt=crs.to_wkt()
+            )
+        with h5py.File(outname, "a") as hf:
+            hf[f"{group_name}/{GSLC_EXCEPTION_MASK_DSET}"][:] = qfsp_arr
 
             # Copy the dataset or group
             if new_path is not None:
@@ -2170,11 +2211,8 @@ def create_compressed_products(
     # valid (the masks change from one acquisition to the next).
     with tempfile.TemporaryDirectory(dir=output_dir, prefix=".mask_") as mask_dir:
         mask_file: Optional[Path] = None
+    use_qfsp_mask: bool = True,
         try:
-            # Real GSLCs first: the first one sets the grid of the combined mask
-            mask_inputs = sorted(
-                cslc_file_list, key=lambda f: "compressed" in str(f).lower()
-            )
             combined_mask = combine_gslc_masks(
                 mask_inputs, frequency=subdataset.split("/")[-2]
             )
@@ -2189,6 +2227,9 @@ def create_compressed_products(
 
         compressed_slc_infos = []
         for _, comp_slc_files in comp_slc_dict.items():
+    use_qfsp_mask : bool
+        Whether to store the combined QFSP mask (`inputDataExceptionMask`) in the
+        compressed SLCs. Default is True.
             for comp_slc_file in comp_slc_files:
                 # Pick out the one that matches the current date
                 ref_date = get_dates(comp_slc_file)[0]
@@ -2200,7 +2241,16 @@ def create_compressed_products(
 
                 cur_opera_cslc = valid_date_files[-1]
                 c = CompressedSLCInfo(
-                    comp_slc_file, output_dir, cur_opera_cslc, subdataset, mask_file
+        # Real GSLCs first: the first one sets the grid of the combined mask
+        mask_inputs = sorted(
+            cslc_file_list, key=lambda f: "compressed" in str(f).lower()
+        )
+                    comp_slc_file,
+                    output_dir,
+                    cur_opera_cslc,
+                    subdataset,
+                    mask_file,
+                    qfsp_mask_file,
                 )
                 compressed_slc_infos.append(c)
 
@@ -2217,4 +2267,22 @@ def create_compressed_products(
             results = list(executor.map(process_compressed_slc, compressed_slc_infos))
 
     logger.info("Finished creating all compressed SLC products.")
+        # Same for the QFSP mask, stored separately
+        qfsp_mask_file: Optional[Path] = None
+        if use_qfsp_mask:
+            try:
+                qfsp_mask = combine_gslc_masks(
+                    mask_inputs,
+                    frequency=subdataset.split("/")[-2],
+                    reader=read_gslc_exception_mask,
+                )
+                qfsp_mask_file = Path(mask_dir) / "combined_qfsp_mask.tif"
+                qfsp_mask.rio.to_raster(qfsp_mask_file, compress="LZW")
+            except Exception as e:
+                logger.warning(
+                    f"Could not make the combined QFSP mask: {e}; compressed SLCs"
+                    " will not store a QFSP mask"
+                )
+                qfsp_mask_file = None
+
     return results
