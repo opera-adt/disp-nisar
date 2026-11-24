@@ -37,11 +37,12 @@ from ._baselines import _interpolate_data, compute_baselines
 from ._common import (
     AMPLITUDE_DISPERSION_DSET,
     DATETIME_FORMAT,
+    GSLC_EXCEPTION_MASK_DSET,
     GSLC_MASK_DSET,
     NISAR_DATASET_NAME,
     NISAR_IDENTIFICATION_GROUP,
 )
-from ._masking import combine_gslc_masks, mask_on_grid
+from ._masking import combine_gslc_masks, mask_on_grid, read_gslc_exception_mask
 from ._reference import ReferencePoint
 from ._streaming import open_h5_file
 from ._utils import extract_footprint
@@ -1297,6 +1298,36 @@ def _create_metadata_group(
                 " generate the product."
             ),
         )
+        # NetCDF/HDF5 has no boolean type: store the flag as uint8 (0 or 1)
+        use_qfsp_mask = AlgorithmParameters.from_yaml(algo_param_path).use_qfsp_mask
+        _create_dataset(
+            group=metadata_group,
+            name="qfsp_mask_applied",
+            dimensions=(),
+            data=np.uint8(use_qfsp_mask),
+            fillvalue=None,
+            description=(
+                "Whether the QFSP mask (`inputDataExceptionMask` of the input GSLCs)"
+                " was applied during processing. 1 = applied, 0 = not applied."
+            ),
+            attrs={"units": "unitless", "flag_values": np.array([0, 1], np.uint8)},
+            dtype=np.uint8,
+        )
+        # With GUNW files the ionosphere phase screen is read from them; otherwise
+        # it is estimated with the split-spectrum method from frequencyA/B GSLCs
+        iono_from_gunw = bool(pge_runconfig.dynamic_ancillary_file_group.gunw_files)
+        _create_dataset(
+            group=metadata_group,
+            name="ionosphere_correction_source",
+            dimensions=(),
+            data="GUNW" if iono_from_gunw else "frequencyA_frequencyB_split_spectrum",
+            fillvalue=None,
+            description=(
+                "Source of the ionosphere correction. 'GUNW': ionosphere phase screen"
+                " read from the input GUNW files. 'frequencyA_frequencyB_split_"
+                "spectrum': estimated from the frequencyA and frequencyB GSLCs."
+            ),
+        )
         _create_dataset(
             group=metadata_group,
             name="dolphin_workflow_config",
@@ -1805,6 +1836,8 @@ class CompressedSLCInfo(NamedTuple):
     subdataset: str = NISAR_DATASET_NAME
     # GeoTIFF with the combined validity mask of all the inputs of this run (1 = valid)
     mask_file: Optional[Path] = None
+    # GeoTIFF with the combined QFSP (`inputDataExceptionMask`) mask (1 = valid)
+    qfsp_mask_file: Optional[Path] = None
 
 
 def process_compressed_slc(info: CompressedSLCInfo) -> Path:
@@ -1815,7 +1848,14 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
     ``<grids/frequencyX>/{<pol>, amplitude_dispersion, xCoordinates, yCoordinates,
     xCoordinateSpacing, yCoordinateSpacing, projection, centerFrequency}``.
     """
-    comp_slc_file, output_dir, opera_cslc_file, subdataset, mask_file = info
+    (
+        comp_slc_file,
+        output_dir,
+        opera_cslc_file,
+        subdataset,
+        mask_file,
+        qfsp_mask_file,
+    ) = info
     date_str = format_dates(*get_dates(comp_slc_file.stem))
 
     name = COMPRESSED_SLC_TEMPLATE.format(date_str=date_str)
@@ -1947,6 +1987,27 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
                 }
             )
 
+        if qfsp_mask_file is not None:
+            # Same dataset name and encoding as a GSLC `inputDataExceptionMask`
+            qfsp_var = data_group.create_variable(
+                GSLC_EXCEPTION_MASK_DSET,
+                dimensions=[y_name, x_name],
+                dtype=np.uint8,
+                fillvalue=0,
+                **HDF5_OPTS,
+            )
+            qfsp_var.attrs.update(
+                {
+                    "long_name": "input data exception (QFSP) mask",
+                    "description": (
+                        "Combined QFSP mask (`inputDataExceptionMask`) of all the"
+                        " inputs used up to this compressed SLC. 1 where valid in"
+                        " every input, 0 elsewhere."
+                    ),
+                    "grid_mapping": grid_mapping_dset_name,
+                }
+            )
+
     # Fill both datasets one strip at a time using iter_blocks
     slc_dset_path = f"{group_name}/{dset_name}"
     disp_dset_path = f"{group_name}/{dispersion_dset_name}"
@@ -1977,6 +2038,16 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
             )
         with h5py.File(outname, "a") as hf:
             hf[f"{group_name}/{GSLC_MASK_DSET}"][:] = mask_arr
+
+    if qfsp_mask_file is not None:
+        import rioxarray
+
+        with rioxarray.open_rasterio(qfsp_mask_file) as da:
+            qfsp_arr = mask_on_grid(
+                da.squeeze(drop=True), y=y_arr, x=x_arr, crs_wkt=crs.to_wkt()
+            )
+        with h5py.File(outname, "a") as hf:
+            hf[f"{group_name}/{GSLC_EXCEPTION_MASK_DSET}"][:] = qfsp_arr
 
     copy_cslc_metadata_to_compressed(opera_cslc_file, outname, frequency=frequency)
 
@@ -2140,6 +2211,7 @@ def create_compressed_products(
     cslc_file_list: Sequence[Path],
     max_workers: int = 3,
     subdataset: str = NISAR_DATASET_NAME,
+    use_qfsp_mask: bool = True,
 ) -> list[Path]:
     """Create all compressed SLC output products.
 
@@ -2159,6 +2231,9 @@ def create_compressed_products(
     subdataset : str
         HDF5 path of the SLC dataset (`input_options.subdataset`), which sets the
         frequency/polarization the compressed SLCs are written under.
+    use_qfsp_mask : bool
+        Whether to store the combined QFSP mask (`inputDataExceptionMask`) in the
+        compressed SLCs. Default is True.
 
     Returns
     -------
@@ -2170,11 +2245,11 @@ def create_compressed_products(
     # valid (the masks change from one acquisition to the next).
     with tempfile.TemporaryDirectory(dir=output_dir, prefix=".mask_") as mask_dir:
         mask_file: Optional[Path] = None
+        # Real GSLCs first: the first one sets the grid of the combined mask
+        mask_inputs = sorted(
+            cslc_file_list, key=lambda f: "compressed" in str(f).lower()
+        )
         try:
-            # Real GSLCs first: the first one sets the grid of the combined mask
-            mask_inputs = sorted(
-                cslc_file_list, key=lambda f: "compressed" in str(f).lower()
-            )
             combined_mask = combine_gslc_masks(
                 mask_inputs, frequency=subdataset.split("/")[-2]
             )
@@ -2186,6 +2261,24 @@ def create_compressed_products(
                 " not store a mask"
             )
             mask_file = None
+
+        # Same for the QFSP mask, stored separately
+        qfsp_mask_file: Optional[Path] = None
+        if use_qfsp_mask:
+            try:
+                qfsp_mask = combine_gslc_masks(
+                    mask_inputs,
+                    frequency=subdataset.split("/")[-2],
+                    reader=read_gslc_exception_mask,
+                )
+                qfsp_mask_file = Path(mask_dir) / "combined_qfsp_mask.tif"
+                qfsp_mask.rio.to_raster(qfsp_mask_file, compress="LZW")
+            except Exception as e:
+                logger.warning(
+                    f"Could not make the combined QFSP mask: {e}; compressed SLCs"
+                    " will not store a QFSP mask"
+                )
+                qfsp_mask_file = None
 
         compressed_slc_infos = []
         for _, comp_slc_files in comp_slc_dict.items():
@@ -2200,7 +2293,12 @@ def create_compressed_products(
 
                 cur_opera_cslc = valid_date_files[-1]
                 c = CompressedSLCInfo(
-                    comp_slc_file, output_dir, cur_opera_cslc, subdataset, mask_file
+                    comp_slc_file,
+                    output_dir,
+                    cur_opera_cslc,
+                    subdataset,
+                    mask_file,
+                    qfsp_mask_file,
                 )
                 compressed_slc_infos.append(c)
 

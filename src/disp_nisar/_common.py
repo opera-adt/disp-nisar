@@ -31,3 +31,5 @@ NISAR_DATASET_NAME = gslc_dataset_name()
 NISAR_IDENTIFICATION_GROUP = "/science/LSAR/identification"
 AMPLITUDE_DISPERSION_DSET = "amplitude_dispersion"
 GSLC_MASK_DSET = "mask"
+# Per-pixel flags for input data exceptions (e.g. QFSP); 0 marks an invalid pixel
+GSLC_EXCEPTION_MASK_DSET = "inputDataExceptionMask"
