@@ -1,6 +1,6 @@
 """Ionosphere correction for NISAR DISP.
 
-Two workflows are provided:
+Three workflows are provided:
 
 GUNW-based
     Read ionosphere phase screens from NISAR GUNW HDF5 products and invert
@@ -13,10 +13,19 @@ GSLC split-spectrum (freqA / freqB)
     :func:`~disp_nisar.ionosphere.gslc.run_ionosphere_estimation` and
     :func:`~disp_nisar.ionosphere.gslc.estimate_pair_ionosphere`.
 
+GSLC main-differential (freqA / A*conj(freqB))
+    Opt-in with ``ionosphere_options.method: main_diff``.  Unwraps A and the
+    double difference directly instead of two separate bands.  Entry point:
+    :func:`~disp_nisar.ionosphere.main_diff.run_main_diff_estimation`.
+
 Sub-modules
 -----------
 gunw        GUNW workflow
 gslc        GSLC split-spectrum workflow
+main_diff   GSLC main-differential workflow
+ionosphere_filter  Filtering for the main-differential workflow
+gslc_mask   GSLC mask reduction for the main-differential workflow
+options     Algorithm-file settings
 inversion   Least-squares network inversion (shared)
 mask        Masking and gap-filling utilities (shared)
 utils       Unit conversions, smoothing, and I/O helpers (shared)

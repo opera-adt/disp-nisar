@@ -135,3 +135,26 @@ def scratch_dir(tmp_path_factory):
         pytest.skip("Real data not available")
     tmpdir = tmp_path_factory.mktemp("test_data")
     return _untar_dir(tmpdir, WORKFLOW_SCRATCH_FILE) / "scratch"
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--regen", action="store_true", help="Rewrite the files in tests/golden"
+    )
+
+
+@pytest.fixture
+def golden(pytestconfig):
+    """Compare text against tests/golden/<name>, or rewrite it under --regen."""
+
+    def _check(name: str, text: str):
+        path = Path(__file__).parent / "golden" / name
+        if pytestconfig.getoption("--regen"):
+            path.write_text(text)
+            pytest.skip(f"regenerated {name}")
+        assert text == path.read_text(), (
+            f"{name} changed. If intended: pytest --regen and explain the diff in the"
+            " commit message."
+        )
+
+    return _check

@@ -1,9 +1,11 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import pytest
 
 from disp_nisar import product
+from disp_nisar.ionosphere.options import IonosphereOptions
 from disp_nisar.pge_runconfig import RunConfig
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -83,3 +85,19 @@ def test_create_compressed_slc(tmp_path):
             in hf
         )
     # assert "/metadata/processing_information/input_burst_metadata/wavelength" in hf
+
+
+@pytest.mark.parametrize(
+    ("gunw_files", "method", "label"),
+    [
+        (["gunw.h5"], "main_diff", "None"),
+        (None, "main_side", "GSLC main-side band (A, B), frequencyA grid"),
+        (None, "main_diff", "GSLC main-differential (A, A-B), frequencyB grid"),
+    ],
+)
+def test_ionospheric_correction_label(gunw_files, method, label):
+    runconfig = SimpleNamespace(
+        dynamic_ancillary_file_group=SimpleNamespace(gunw_files=gunw_files),
+        get_ionosphere_options=lambda: IonosphereOptions(method=method),
+    )
+    assert product._ionospheric_correction_label(runconfig) == label

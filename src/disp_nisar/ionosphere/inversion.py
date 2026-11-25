@@ -41,7 +41,7 @@ def build_design_matrix(
     num_ifgs = len(ifg_date_pairs)
     num_dates = len(unique_dates)
 
-    A: np.ndarray = np.zeros((num_ifgs, num_dates - 1), dtype=np.float32)
+    A = np.zeros((num_ifgs, num_dates - 1), dtype=np.float32)
     date_to_idx = {d: i for i, d in enumerate(unique_dates)}
 
     for i, (ref_date, sec_date) in enumerate(ifg_date_pairs):
@@ -90,7 +90,7 @@ def invert_ifg_to_timeseries(
     num_ifgs, rows, cols = ifg_stack.shape
     num_unknowns = design_matrix.shape[1]
 
-    ifg_flat: np.ndarray = ifg_stack.astype(np.float32).reshape(num_ifgs, -1)
+    ifg_flat = ifg_stack.astype(np.float32).reshape(num_ifgs, -1)
 
     # Track pixels with no valid data in any interferogram
     all_nan_mask = ~np.isfinite(ifg_flat).any(axis=0)

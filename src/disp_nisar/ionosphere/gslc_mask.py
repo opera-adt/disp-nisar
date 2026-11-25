@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import h5py
@@ -9,6 +10,7 @@ import numpy as np
 import rasterio
 from affine import Affine
 from dolphin import io
+from dolphin.io._core import read_nisar_grid_metadata
 from rasterio.crs import CRS
 from rasterio.windows import Window
 
@@ -18,7 +20,9 @@ from ._main_diff_io import (
 from .utils import WORKING_TIFF_OPTIONS, check_reduction
 
 
-def _intervals(origin, step, dst_origin, dst_step, n):
+def _intervals(
+    origin: float, step: float, dst_origin: float, dst_step: float, n: int
+) -> tuple[np.ndarray, np.ndarray]:
     edges = (dst_origin + np.arange(n + 1) * dst_step - origin) / step
     rounded = np.rint(edges)
     edges = np.where(np.abs(edges - rounded) < 1e-6, rounded, edges)
@@ -28,7 +32,9 @@ def _intervals(origin, step, dst_origin, dst_step, n):
     )
 
 
-def _sums(a, r0, r1, c0, c1):
+def _sums(
+    a: np.ndarray, r0: np.ndarray, r1: np.ndarray, c0: np.ndarray, c1: np.ndarray
+) -> np.ndarray:
     ii = np.zeros((a.shape[0] + 1, a.shape[1] + 1), np.int64)
     np.cumsum(a, axis=0, dtype=np.int64, out=ii[1:, 1:])
     np.cumsum(ii[1:, 1:], axis=1, out=ii[1:, 1:])
@@ -40,7 +46,9 @@ def _sums(a, r0, r1, c0, c1):
     )
 
 
-def reduce_gslc_mask(dataset, source: Grid, target: Grid, mode: str, tile_size: int):
+def reduce_gslc_mask(
+    dataset: h5py.Dataset, source: Grid, target: Grid, mode: str, tile_size: int
+) -> Iterator[tuple[Window, np.ndarray, np.ndarray]]:
     """Yield window, valid donor, and footprint arrays without a native-sized read.
 
     Raw GSLC codes: 1..254 valid subswath IDs, 0 invalid inside, 255 outside.
@@ -114,24 +122,19 @@ def prepare_gslc_mask_cache(
     if resume and all(p.is_file() for p in outputs.values()):
         return outputs
     temporary = {n: p.with_name(f"{p.stem}.partial.tif") for n, p in outputs.items()}
+    mask_path = f"/science/LSAR/GSLC/grids/frequency{band}/mask"
+    nx, ny, geotransform, epsg, _ = read_nisar_grid_metadata(source, mask_path)
+    native = Grid(ny, nx, CRS.from_epsg(epsg), Affine.from_gdal(*geotransform))
+    check_reduction(native, grid)
     with h5py.File(source, "r", rdcc_nbytes=16 * 1024**2) as h:
-        g = h[f"/science/LSAR/GSLC/grids/frequency{band}"]
-        x, y = np.asarray(g["xCoordinates"]), np.asarray(g["yCoordinates"])
-        if min(len(x), len(y)) < 2 or g["mask"].shape != (len(y), len(x)):
+        mask = h[mask_path]
+        if mask.shape != (ny, nx):
             raise ValueError("Invalid GSLC coordinate/mask dimensions")
-        dx, dy = float(x[1] - x[0]), float(y[1] - y[0])
-        if not (np.allclose(np.diff(x), dx) and np.allclose(np.diff(y), dy)):
-            raise ValueError("Nonuniform GSLC coordinates")
-        proj = g["projection"]
-        wkt = proj.attrs.get("spatial_ref", proj.attrs.get("crs_wkt"))
-        if isinstance(wkt, bytes):
-            wkt = wkt.decode()
-        crs = CRS.from_wkt(wkt) if wkt is not None else CRS.from_epsg(int(proj[()]))
-        native = Grid(
-            len(y), len(x), crs, Affine(dx, 0, x[0] - dx / 2, 0, dy, y[0] - dy / 2)
+        ratio = abs(
+            grid.transform.a
+            * grid.transform.e
+            / (native.transform.a * native.transform.e)
         )
-        check_reduction(native, grid)
-        ratio = abs(grid.transform.a / dx * grid.transform.e / dy)
         tile = max(1, min(tile_size, int(np.sqrt(work_mb * 1024**2 / (64 * ratio)))))
         for path in temporary.values():
             io.write_arr(
@@ -150,9 +153,7 @@ def prepare_gslc_mask_cache(
             rasterio.open(temporary["valid"], "r+") as vd,
             rasterio.open(temporary["inside"], "r+") as fd,
         ):
-            for win, valid, inside in reduce_gslc_mask(
-                g["mask"], native, grid, mode, tile
-            ):
+            for win, valid, inside in reduce_gslc_mask(mask, native, grid, mode, tile):
                 vd.write(valid.astype("uint8"), 1, window=win)
                 fd.write(inside.astype("uint8"), 1, window=win)
     for name in outputs:

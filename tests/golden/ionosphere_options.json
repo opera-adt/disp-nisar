@@ -1,0 +1,28 @@
+{
+  "block_size": 256,
+  "correlation_threshold": 0.2,
+  "filtering": {
+    "donor_erosion_px": null,
+    "filling_method": "nearest",
+    "guide_filter_method": "median_gaussian",
+    "guide_median_size": 3,
+    "kernel_size_px": null,
+    "method": "guided",
+    "outlier_min_scale_rad": 0.1,
+    "outlier_threshold": 3.5,
+    "restore_mask": false,
+    "sigma_m": null,
+    "truncate": 4.0
+  },
+  "keep_intermediates": false,
+  "mask_erosion_px": 3,
+  "mask_reduction": "all_valid",
+  "mask_work_mb": 128,
+  "method": "main_side",
+  "min_phasor_magnitude": 0.1,
+  "min_valid_fraction": 1.0,
+  "nlooks": 5.0,
+  "resume": true,
+  "similarity_threshold": 0.4,
+  "smooth_sigma_m": 400.0
+}

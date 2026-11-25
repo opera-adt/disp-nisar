@@ -1,4 +1,5 @@
 import datetime
+import json
 import random
 import sys
 import warnings
@@ -8,6 +9,7 @@ import pytest
 from dolphin.stack import CompressedSlcPlan
 
 from disp_nisar import pge_runconfig
+from disp_nisar.ionosphere.options import IonosphereFilterOptions, IonosphereOptions
 from disp_nisar.pge_runconfig import (
     AlgorithmParameters,
     DynamicAncillaryFileGroup,
@@ -561,3 +563,48 @@ def test_parse_reference_date_json():
     # None file returns empty list
     result = pge_runconfig._parse_reference_date_json(None, 23210)
     assert result == []
+
+
+def test_ionosphere_option_defaults_are_pinned(golden):
+    """A moved default changes what a run produces, so it must be deliberate."""
+    options = AlgorithmParameters().ionosphere_options
+    golden(
+        "ionosphere_options.json",
+        json.dumps(options.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+    )
+
+
+def test_ionosphere_options_round_trip_through_yaml(tmp_path):
+    params = AlgorithmParameters(
+        ionosphere_options=IonosphereOptions(
+            method="main_diff",
+            filtering=IonosphereFilterOptions(sigma_m=(2000.0, 2000.0)),
+        )
+    )
+    path = tmp_path / "params.yaml"
+    params.to_yaml(path)
+
+    loaded = AlgorithmParameters.from_yaml(path).ionosphere_options
+
+    assert loaded == params.ionosphere_options
+
+
+def test_shipped_historical_parameters_keep_the_default_estimator():
+    path = Path(__file__).parents[1] / "configs/algorithm_parameters_historical.yaml"
+    assert AlgorithmParameters.from_yaml(path).ionosphere_options.method == "main_side"
+
+
+def test_ionosphere_options_are_not_passed_to_dolphin(runconfig_minimum):
+    """The workflow model forbids unknown fields, so this would fail when built."""
+    workflow = runconfig_minimum.to_workflow()
+    assert "ionosphere_options" not in workflow.model_dump()
+
+
+def test_get_ionosphere_options_reads_the_main_parameters(runconfig_minimum, tmp_path):
+    path = tmp_path / "params.yaml"
+    AlgorithmParameters(
+        ionosphere_options=IonosphereOptions(method="main_diff")
+    ).to_yaml(path)
+    runconfig_minimum.dynamic_ancillary_file_group.algorithm_parameters_file = path
+
+    assert runconfig_minimum.get_ionosphere_options().method == "main_diff"

@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
 from disp_nisar.ionosphere import build_design_matrix, invert_ifg_to_timeseries
+from disp_nisar.ionosphere.inversion import invert_common_phase_block
 
 
 def test_build_design_matrix():
@@ -60,3 +62,52 @@ def test_invert_ifg_to_timeseries():
     result = invert_ifg_to_timeseries(ifg_stack, A)
     assert result.shape == ts_true.shape
     np.testing.assert_allclose(result, ts_true, atol=1e-4)
+
+
+def _network():
+    pairs = [(0, 1), (1, 2), (2, 3), (0, 2), (1, 3)]
+    design = build_design_matrix(pairs, [0, 1, 2, 3])
+    rng = np.random.default_rng(0)
+    truth = rng.normal(size=(4, 3, 3))
+    truth[0] = 0
+    phase = np.stack([truth[j] - truth[i] for i, j in pairs]).astype(np.float32)
+    return design, truth, phase
+
+
+def test_invert_common_phase_block_recovers_time_series():
+    design, truth, phase = _network()
+    a, d = invert_common_phase_block(
+        phase, 2 * phase, design, np.ones(phase.shape, bool)
+    )
+    np.testing.assert_allclose(a, truth[1:], atol=1e-5)
+    np.testing.assert_allclose(d, 2 * truth[1:], atol=1e-5)
+
+
+def test_invert_common_phase_block_drops_missing_observations():
+    """A missing pair is removed, not treated as an observation of zero."""
+    design, truth, phase = _network()
+    valid = np.ones(phase.shape, bool)
+    valid[3, 0, 0] = False
+    phase[3, 0, 0] = 1e4
+    a, _ = invert_common_phase_block(phase, phase, design, valid)
+    np.testing.assert_allclose(a[:, 0, 0], truth[1:, 0, 0], atol=1e-5)
+
+
+def test_invert_common_phase_block_split_network_is_nan():
+    design, truth, phase = _network()
+    valid = np.ones(phase.shape, bool)
+    # Without these pairs, no observation joins epochs 0-1 to epochs 2-3
+    valid[[1, 3, 4], 2, 2] = False
+    a, _ = invert_common_phase_block(phase, phase, design, valid)
+    assert np.isnan(a[:, 2, 2]).all()
+    np.testing.assert_allclose(a[:, 0, 0], truth[1:, 0, 0], atol=1e-5)
+
+
+def test_invert_common_phase_block_rejects_mismatched_shapes():
+    design, _, phase = _network()
+    with pytest.raises(ValueError, match="matching shapes"):
+        invert_common_phase_block(phase, phase[:-1], design, np.ones(phase.shape, bool))
+    with pytest.raises(ValueError, match="matching network"):
+        invert_common_phase_block(
+            phase[:-1], phase[:-1], design, np.ones(phase[:-1].shape, bool)
+        )

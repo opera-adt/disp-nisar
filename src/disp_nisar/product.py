@@ -1198,6 +1198,15 @@ def _create_identification_group(
         )
 
 
+def _ionospheric_correction_label(pge_runconfig: RunConfig) -> str:
+    """Name the GSLC estimator behind the correction, or "None" for GUNW inputs."""
+    if pge_runconfig.dynamic_ancillary_file_group.gunw_files:
+        return "None"
+    if pge_runconfig.get_ionosphere_options().method == "main_diff":
+        return "GSLC main-differential (A, A-B), frequencyB grid"
+    return "GSLC main-side band (A, B), frequencyA grid"
+
+
 def _create_metadata_group(
     output_name: Filename,
     pge_runconfig: RunConfig,
@@ -1481,12 +1490,7 @@ def _create_metadata_group(
             group=metadata_group,
             name="ceos_ionospheric_phase_correction",
             dimensions=(),
-            data=(
-                "GSLC main-differential (A, A-B), frequencyB grid"
-                if not pge_runconfig.dynamic_ancillary_file_group.gunw_files
-                and pge_runconfig.get_ionosphere_options().method == "main_diff"
-                else "None"
-            ),
+            data=_ionospheric_correction_label(pge_runconfig),
             fillvalue=None,
             description="Method used to correct for ionospheric phase noise",
         )
