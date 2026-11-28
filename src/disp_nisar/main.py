@@ -38,6 +38,7 @@ from disp_nisar._utils import (
     _update_spurt_conncomps,
 )
 from disp_nisar.ionosphere import get_ionosphere_phase_screen
+from disp_nisar.ionosphere.options import IonosphereOptions
 from disp_nisar.pge_runconfig import AlgorithmParameters, RunConfig
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,8 @@ def run(
     setup_logging(logger_name="disp_nisar", debug=debug, filename=cfg.log_file)
     # Save the start for a metadata field
     processing_start_datetime = datetime.now(timezone.utc)
+
+    main_diff_options = _get_main_diff_options(cfg, pge_runconfig)
 
     # Add a check to fail if passed duplicate dates area passed
     _assert_no_duplicate_dates(cfg.cslc_file_list)
@@ -276,6 +279,9 @@ def run(
         out_paths.timeseries_paths = final_ts_paths
         out_paths.timeseries_residual_paths = final_residual_paths
 
+    # Preserve the full network before product-date filtering.
+    full_out_paths = out_paths
+
     # Filter by last processed date
     if last_processed := pge_runconfig.input_file_group.last_processed:
         logger.info(f"Filtering outputs before {last_processed}")
@@ -289,7 +295,16 @@ def run(
     )
 
     # IONOSPHERE
-    if not pge_runconfig.dynamic_ancillary_file_group.gunw_files:
+    if main_diff_options is not None:
+        out_paths.ionospheric_corrections = _run_main_diff_workflow(
+            cfg,
+            pge_runconfig,
+            full_out_paths,
+            out_paths.timeseries_paths,
+            main_diff_options,
+            debug,
+        )
+    elif not pge_runconfig.dynamic_ancillary_file_group.gunw_files:
         from disp_nisar.ionosphere import (
             get_center_frequencies,
             run_ionosphere_estimation,
@@ -392,6 +407,116 @@ def run(
     logger.info(f"Maximum memory usage: {max_mem:.2f} GB")
     logger.info(f"Config file dolphin version: {cfg._dolphin_version}")
     logger.info(f"Current running disp_nisar version: {__version__}")
+
+
+def _get_main_diff_options(
+    cfg: DisplacementWorkflow, pge_runconfig: RunConfig
+) -> IonosphereOptions | None:
+    """Return the options when this run uses main_diff, otherwise None.
+
+    Runs with GUNW inputs read the phase screen from those products, and
+    ``method: main_side`` keeps the split-spectrum workflow.
+
+    Raises
+    ------
+    ValueError
+        If main_diff was requested for a run it does not support.
+
+    """
+    if pge_runconfig.dynamic_ancillary_file_group.gunw_files:
+        return None
+    options = pge_runconfig.get_ionosphere_options()
+    if options.method != "main_diff":
+        return None
+    if pge_runconfig.input_file_group.frequency != "frequencyA":
+        raise ValueError("main_diff requires a nominal frequencyA workflow")
+    if pge_runconfig.primary_executable.product_type == "DISP_NISAR_FORWARD" or any(
+        "compressed" in f.name.lower() for f in cfg.cslc_file_list
+    ):
+        raise ValueError(
+            "main_diff supports uncompressed historical GSLC stacks only;"
+            " forward/compressed A/B state is not yet supported"
+        )
+    if (
+        pge_runconfig.dynamic_ancillary_file_group.ionosphere_algorithm_parameters_file
+        is None
+    ):
+        raise ValueError("main_diff requires an explicit frequencyB algorithm file")
+    return options
+
+
+def _run_main_diff_workflow(
+    cfg: DisplacementWorkflow,
+    pge_runconfig: RunConfig,
+    full_outputs: OutputPaths,
+    product_paths: list[Path],
+    options: IonosphereOptions,
+    debug: bool,
+) -> list[Path]:
+    """Run B through stitched IFGs, then estimate A/(A-B) corrections."""
+    from disp_nisar.ionosphere.gslc import get_center_frequencies
+    from disp_nisar.ionosphere.main_diff import BandInputs, run_main_diff_estimation
+
+    if not product_paths:
+        return []
+    cfg_b = pge_runconfig.to_workflow(
+        frequency="frequencyB", scratch_suffix="_freqB_main_diff"
+    )
+    cfg_b.output_options.bounds = cfg.output_options.bounds
+    cfg_b.output_options.bounds_epsg = cfg.output_options.bounds_epsg
+    cfg_b.output_options.epsg = cfg.output_options.epsg
+    method = getattr(
+        cfg_b.unwrap_options.unwrap_method, "value", cfg_b.unwrap_options.unwrap_method
+    )
+    if method not in ("snaphu", "whirlwind"):
+        raise ValueError(
+            "main_diff requires snaphu or whirlwind in the frequencyB "
+            f"algorithm file; received {method!r}"
+        )
+    # Reuse the prepared binary mask, not the raw water-distance ancillary.
+    cfg_b.mask_file = cfg.mask_file
+    cfg_b.unwrap_options.run_unwrap = False
+    cfg_b.timeseries_options.run_inversion = False
+    cfg_b.timeseries_options.run_velocity = False
+    out_b = run_displacement(cfg=cfg_b, debug=debug, raise_on_empty=False)
+    gslc_by_date = {}
+    frequencies = None
+    for path in cfg.cslc_file_list:
+        date = get_dates(path)[0].replace(hour=0, minute=0, second=0, microsecond=0)
+        if date in gslc_by_date:
+            raise ValueError(f"Duplicate GSLC acquisition: {date}")
+        gslc_by_date[date] = path
+        current = get_center_frequencies(path)
+        if frequencies is not None and not np.allclose(
+            current, frequencies, rtol=0, atol=1
+        ):
+            raise ValueError("Center frequencies change within the GSLC stack")
+        frequencies = current
+    if frequencies is None:
+        raise ValueError("No GSLC inputs for main_diff")
+    ref = read_reference_point(product_paths[0].parent)
+    result = run_main_diff_estimation(
+        band_a=BandInputs(
+            full_outputs.stitched_ifg_paths,
+            full_outputs.stitched_cor_paths,
+            full_outputs.stitched_similarity_file,
+        ),
+        band_b=BandInputs(
+            out_b.stitched_ifg_paths,
+            out_b.stitched_cor_paths,
+            out_b.stitched_similarity_file,
+        ),
+        gslc_by_date=gslc_by_date,
+        output_timeseries_paths=product_paths,
+        reference_a=(ref.row, ref.col),
+        f_A=frequencies[0],
+        f_B=frequencies[1],
+        out_dir=cfg.work_directory / "ionosphere_main_diff",
+        unwrap_options=cfg_b.unwrap_options,
+        options=options,
+    )
+    _prune_block_dirs(cfg_b.work_directory)
+    return result
 
 
 def _prune_block_dirs(work_directory: Path, keep_files: Iterable[Path] = ()) -> int:
@@ -499,6 +624,7 @@ def create_products(
         _assert_dates_match(
             disp_date_keys, out_paths.ionospheric_corrections, "ionosphere"
         )
+    matching_water_binary_mask = None
 
     combined_mask_file = cfg.work_directory / "combined_water_nodata_mask.tif"
 
@@ -516,21 +642,23 @@ def create_products(
         logger.warning(f"Failed to create GSLC mask: {e}; continuing without it")
         water_gslc_mask_warped = None
 
-    if pge_runconfig.dynamic_ancillary_file_group.mask_file:
-        # Combine masks: water + GSLC + nodata
+    # Combine masks: water + GSLC + nodata. A validity mask is required even
+    # without an ancillary water mask, since conncomp regrowth reads it.
+    if (
+        pge_runconfig.dynamic_ancillary_file_group.mask_file
+        and water_gslc_mask_warped is not None
+    ):
         matching_water_binary_mask = water_gslc_mask_warped
-        if water_gslc_mask_warped is not None:
-            create_combined_mask(
-                mask_filename=matching_water_binary_mask,
-                image_filename=out_paths.timeseries_paths[0],
-                output_filename=combined_mask_file,
-            )
-        else:
-            matching_water_binary_mask = None
-            _create_nodata_mask(
-                filename=out_paths.timeseries_paths[0],
-                output_filename=combined_mask_file,
-            )
+        create_combined_mask(
+            mask_filename=matching_water_binary_mask,
+            image_filename=out_paths.timeseries_paths[0],
+            output_filename=combined_mask_file,
+        )
+    else:
+        _create_nodata_mask(
+            filename=out_paths.timeseries_paths[0],
+            output_filename=combined_mask_file,
+        )
 
     ## TODO: remove stitched from naming in run_displacement
     # Check and update correlation paths
@@ -558,6 +686,7 @@ def create_products(
         if method in ("snaphu", "phass", "whirlwind"):
             row_looks, col_looks = cfg.phase_linking.half_window.to_looks()
             nlooks = row_looks * col_looks
+
             out_paths.conncomp_paths = _update_snaphu_conncomps(
                 timeseries_paths=timeseries_rad_paths,
                 stitched_cor_paths=out_paths.stitched_cor_paths,
@@ -999,9 +1128,9 @@ def process_product(
             files.unwrapped,
             resample_alg="bilinear",
         )
-        iono_radians = io.load_gdal(warped_iono)
-        iono_radians *= wavelength / (4.0 * np.pi)
-        corrections["ionosphere"] = iono_radians
+        corrections["ionosphere"] = _ionosphere_to_meters(
+            files.ionosphere, io.load_gdal(warped_iono), wavelength
+        )
     else:
         logger.warning(
             "Missing ionospheric correction for %s. Creating empty layer.",
@@ -1148,10 +1277,37 @@ def create_displacement_products(
         )
 
 
-def _create_nodata_mask(filename: PathOrStr, output_filename: PathOrStr) -> None:
-    # Mark nodata as 0/False, valid as 1/True
-    mask = io.load_gdal(filename, masked=True).filled(0) != 0
-    # A valid output has to be valid in the mask, AND not be a `nodata`
+def _ionosphere_to_meters(
+    iono_file: PathOrStr, iono: np.ndarray, wavelength: float
+) -> np.ndarray:
+    """Return a correction in meters, converting only if it declares otherwise.
+
+    Raises
+    ------
+    ValueError
+        If a main_diff correction does not declare meters.
+
+    """
+    units = (io.get_raster_units(iono_file) or "").strip().lower()
+    is_meters = units in ("m", "meter", "meters", "metre", "metres")
+    method = io.get_raster_metadata(iono_file).get("ionosphere_method")
+    if method == "main_diff" and not is_meters:
+        raise ValueError(f"main_diff correction must declare meters; got {units!r}")
+    return iono if is_meters else iono * (wavelength / (4.0 * np.pi))
+
+
+def _create_nodata_mask(
+    filename: PathOrStr,
+    output_filename: PathOrStr,
+) -> None:
+    """Write 1 for valid finite pixels and 0 for invalid pixels."""
+    image = io.load_gdal(filename, masked=True)
+
+    valid = ~np.ma.getmaskarray(image) & np.isfinite(np.ma.getdata(image))
+
     io.write_arr(
-        like_filename=filename, arr=mask, nodata=255, output_name=output_filename
+        like_filename=filename,
+        arr=valid.astype(np.uint8),
+        nodata=255,
+        output_name=output_filename,
     )
