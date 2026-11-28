@@ -101,6 +101,8 @@ def test_ionospheric_correction_label(gunw_files, method, label):
         get_ionosphere_options=lambda: IonosphereOptions(method=method),
     )
     assert product._ionospheric_correction_label(runconfig) == label
+
+
 def test_compressed_slc_has_gslc_layout(tmp_path):
     """Compressed SLCs are readable by the same code that reads real GSLCs."""
     import numpy as np

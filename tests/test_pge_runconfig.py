@@ -625,6 +625,8 @@ def test_get_ionosphere_options_reads_the_main_parameters(runconfig_minimum, tmp
     runconfig_minimum.dynamic_ancillary_file_group.algorithm_parameters_file = path
 
     assert runconfig_minimum.get_ionosphere_options().method == "main_diff"
+
+
 def test_forward_mode_network_nearest4_has_no_duplicate_pairs():
     """The nearest-4 network must not repeat a pair (regression: (-5, -2) twice)."""
     net4 = pge_runconfig._create_forward_mode_network(nearest_n=4)

@@ -250,6 +250,8 @@ def test_main_diff_workflow_rejects_changing_frequencies(main_diff_run, monkeypa
     )
     with pytest.raises(ValueError, match="change within the GSLC stack"):
         _run_workflow(main_diff_run)
+
+
 # ---------------------------------------------------------------------------
 # Input prechecks
 # ---------------------------------------------------------------------------
