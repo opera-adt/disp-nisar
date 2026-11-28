@@ -6,6 +6,7 @@ import datetime
 import gc
 import logging
 import subprocess
+import tempfile
 from collections.abc import Iterable, Mapping
 from io import StringIO
 from multiprocessing import get_context
@@ -33,7 +34,14 @@ from opera_utils import (
 
 from . import __version__ as disp_nisar_version
 from ._baselines import _interpolate_data, compute_baselines
-from ._common import DATETIME_FORMAT, NISAR_DATASET_NAME, NISAR_IDENTIFICATION_GROUP
+from ._common import (
+    AMPLITUDE_DISPERSION_DSET,
+    DATETIME_FORMAT,
+    GSLC_MASK_DSET,
+    NISAR_DATASET_NAME,
+    NISAR_IDENTIFICATION_GROUP,
+)
+from ._masking import combine_gslc_masks, mask_on_grid
 from ._reference import ReferencePoint
 from ._streaming import open_h5_file
 from ._utils import extract_footprint
@@ -76,6 +84,18 @@ HDF5_OPTS["chunks"] = tuple(CHUNK_SHAPE)  # type: ignore
 GRID_MAPPING_DSET = "spatial_ref"
 
 COMPRESSED_SLC_TEMPLATE = "compressed_{date_str}.h5"
+
+
+def nodata_mask(arr: np.ma.MaskedArray) -> np.ndarray:
+    """Where the unwrapped raster actually has no data.
+
+    Taken from the array's own mask rather than inferred from the values.
+    Inferring it -- `np.ma.filled(arr, 0) == 0` -- discards every pixel whose
+    unwrapped phase is exactly zero, and one pixel is guaranteed to be:
+    `dolphin.timeseries` subtracts the reference pixel's value from the whole
+    array, so the reference pixel is exactly 0.0 by construction.
+    """
+    return np.ma.getmaskarray(arr)
 
 
 def create_output_product(
@@ -222,10 +242,10 @@ def create_output_product(
 
     # Load and process unwrapped phase data, needs more custom masking
     unw_arr_ma = io.load_gdal(unw_filename, masked=True)
+    mask = nodata_mask(unw_arr_ma)
     unw_arr = np.ma.filled(unw_arr_ma, 0)
     del unw_arr_ma
     gc.collect()
-    mask = unw_arr == 0
 
     input_units = io.get_raster_units(unw_filename)
     if not input_units or input_units not in ("meters", "radians"):
@@ -697,6 +717,9 @@ def _create_identification_group(
 ) -> None:
     """Create the identification group in the output file."""
     logger.info("Creating /identification group in %s", output_name)
+    # The displacement is made from the configured input polarization
+    polarization = pge_runconfig.input_file_group.polarization
+    polarization = getattr(polarization, "value", polarization)
     with h5netcdf.File(output_name, "a") as f:
         identification_group = f.create_group(IDENTIFICATION_GROUP_NAME)
         _create_dataset(
@@ -1017,7 +1040,7 @@ def _create_identification_group(
             group=identification_group,
             name="source_data_polarization",
             dimensions=(),
-            data="HH",
+            data=polarization,
             fillvalue=None,
             description="Radar polarization of input products used",
             attrs={"units": "unitless"},
@@ -1144,7 +1167,7 @@ def _create_identification_group(
             group=identification_group,
             name="product_data_polarization",
             dimensions=(),
-            data="VV",
+            data=polarization,
             fillvalue=None,
             description="Radar polarization of displacement products",
         )
@@ -1787,12 +1810,21 @@ class CompressedSLCInfo(NamedTuple):
     comp_slc_file: Path
     output_dir: Path
     opera_cslc_file: Path
+    # Full HDF5 path of the SLC dataset, e.g. /science/LSAR/GSLC/grids/frequencyA/HH
+    subdataset: str = NISAR_DATASET_NAME
+    # GeoTIFF with the combined validity mask of all the inputs of this run (1 = valid)
+    mask_file: Optional[Path] = None
 
 
 def process_compressed_slc(info: CompressedSLCInfo) -> Path:
-    """Make one compressed SLC output product."""
-    # burst_id, comp_slc_file, output_dir, opera_cslc_file = info
-    comp_slc_file, output_dir, opera_cslc_file = info
+    """Make one compressed SLC output product.
+
+    The file mirrors the layout of a NISAR GSLC, so every reader of GSLCs (frame
+    bounds, center frequency, dolphin's subdataset readers) works on it unchanged:
+    ``<grids/frequencyX>/{<pol>, amplitude_dispersion, xCoordinates, yCoordinates,
+    xCoordinateSpacing, yCoordinateSpacing, projection, centerFrequency}``.
+    """
+    comp_slc_file, output_dir, opera_cslc_file, subdataset, mask_file = info
     date_str = format_dates(*get_dates(comp_slc_file.stem))
 
     name = COMPRESSED_SLC_TEMPLATE.format(date_str=date_str)
@@ -1813,33 +1845,61 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
     attrs = {"units": "unitless"}
     attrs.update(metadata_dict)
 
-    *parts, dset_name = NISAR_DATASET_NAME.split("/")
-    dispersion_dset_name = "amplitude_dispersion"
+    *parts, dset_name = subdataset.split("/")
+    dispersion_dset_name = AMPLITUDE_DISPERSION_DSET
     group_name = "/".join(parts)
+    frequency = parts[-1]
+    epsg = crs.to_epsg()
+    if epsg is None:
+        msg = f"Could not determine an EPSG code from the CRS of {comp_slc_file}"
+        raise ValueError(msg)
+
     logger.info(f"Writing {outname}")
     with h5py.File(outname, "w") as hf:
         # add type to root for GDAL recognition of complex datasets in NetCDF
         ctype = h5py.h5t.py_create(np.complex64)
         ctype.commit(hf["/"].id, np.bytes_("complex64"))
 
-    # COMPASS used "_coordinates" instead of "x"/"y"
-    x_name, y_name = "x_coordinates", "y_coordinates"
+    # Same names as the NISAR GSLC grid group
+    x_name, y_name = "xCoordinates", "yCoordinates"
     grid_mapping_dset_name = "projection"
+    y_arr, x_arr = _create_yx_arrays(gt, shape)
     with h5netcdf.File(outname, mode="a", invalid_netcdf=True) as f:
         f.attrs.update(attrs)
 
         data_group = f.create_group(group_name)
-        # COMPASS used "projection" instead of "spatial_ref"
-        _create_grid_mapping(
-            group=data_group, crs=crs, gt=gt, name=grid_mapping_dset_name
+        data_group.dimensions = {y_name: y_arr.size, x_name: x_arr.size}
+
+        # `projection` holds the EPSG code, with CF/GeoTransform info as attributes
+        proj_var = data_group.create_variable(
+            grid_mapping_dset_name, (), data=epsg, dtype=np.int32
         )
-        _create_yx_dsets(
-            group=data_group,
-            gt=gt,
-            shape=shape,
-            include_time=False,
-            x_name=x_name,
-            y_name=y_name,
+        proj_var.attrs.update(crs.to_cf())
+        proj_var.attrs.update(
+            {
+                "epsg_code": epsg,
+                "GeoTransform": " ".join(str(v) for v in gt),
+                "units": "unitless",
+                "long_name": (
+                    "Dummy variable with geo-referencing metadata in attributes"
+                ),
+            }
+        )
+        for name, arr in ((y_name, y_arr), (x_name, x_arr)):
+            coord_var = data_group.create_variable(name, (name,), data=arr, dtype=float)
+            coord_var.attrs.update(
+                {
+                    "standard_name": f"projection_{name[0]}_coordinate",
+                    "long_name": f"{name[0]} coordinate of projection",
+                    "units": "meters",
+                }
+            )
+        # gt = (x_origin, x_res, 0, y_origin, 0, y_res); y_res is negative
+        data_group.create_variable(
+            "xCoordinateSpacing", (), data=float(gt[1]), dtype=np.float64
+        )
+        data_group.create_variable(
+            "yCoordinateSpacing", (), data=float(gt[5]), dtype=np.float64
         )
 
         # Create empty datasets; filled blockwise below to avoid allocating
@@ -1876,6 +1936,26 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
             }
         )
 
+        if mask_file is not None:
+            # Same dataset name and encoding as a GSLC `mask` (>= 1 valid, 0 invalid)
+            mask_var = data_group.create_variable(
+                GSLC_MASK_DSET,
+                dimensions=[y_name, x_name],
+                dtype=np.uint8,
+                fillvalue=0,
+                **HDF5_OPTS,
+            )
+            mask_var.attrs.update(
+                {
+                    "long_name": "valid sample mask",
+                    "description": (
+                        "Combined validity mask of all the inputs used up to this"
+                        " compressed SLC. 1 where valid in every input, 0 elsewhere."
+                    ),
+                    "grid_mapping": grid_mapping_dset_name,
+                }
+            )
+
     # Fill both datasets one strip at a time using iter_blocks
     slc_dset_path = f"{group_name}/{dset_name}"
     disp_dset_path = f"{group_name}/{dispersion_dset_name}"
@@ -1897,7 +1977,17 @@ def process_compressed_slc(info: CompressedSLCInfo) -> Path:
             round_mantissa(disp_block, keep_bits=10)
             disp_dset[row_slice, :] = disp_block
 
-    copy_cslc_metadata_to_compressed(opera_cslc_file, outname)
+    if mask_file is not None:
+        import rioxarray
+
+        with rioxarray.open_rasterio(mask_file) as da:
+            mask_arr = mask_on_grid(
+                da.squeeze(drop=True), y=y_arr, x=x_arr, crs_wkt=crs.to_wkt()
+            )
+        with h5py.File(outname, "a") as hf:
+            hf[f"{group_name}/{GSLC_MASK_DSET}"][:] = mask_arr
+
+    copy_cslc_metadata_to_compressed(opera_cslc_file, outname, frequency=frequency)
 
     return outname
 
@@ -1943,7 +2033,9 @@ def _copy_hdf5_dsets(
 
 
 def copy_cslc_metadata_to_compressed(
-    opera_cslc_file: Filename, output_hdf5_file: Filename
+    opera_cslc_file: Filename,
+    output_hdf5_file: Filename,
+    frequency: str = "frequencyA",
 ) -> None:
     """Copy orbit and metadata datasets from the input CSLC file to the compressed SLC.
 
@@ -1953,21 +2045,23 @@ def copy_cslc_metadata_to_compressed(
         Path to the input CSLC file.
     output_hdf5_file : Filename
         Path to the output compressed SLC file.
+    frequency : str
+        Frequency group (e.g. "frequencyA") whose metadata to copy.
 
     """
-    # TODO: this function requires NISAR datasets and it should be based on frequency
-    # and polarization. Hardcoding for now
     dsets_to_copy = [
         ("/science/LSAR/GSLC/metadata/orbit", None),
+        # Same location as in a GSLC, where `_frequency_to_wavelength` looks
+        (f"/science/LSAR/GSLC/grids/{frequency}/centerFrequency", None),
         # ("/metadata/processing_information/input_burst_metadata/wavelength", None),
         (
-            "/science/LSAR/GSLC/metadata/sourceData/swaths/frequencyA/centerFrequency",
+            f"/science/LSAR/GSLC/metadata/sourceData/swaths/{frequency}/centerFrequency",
             None,
         ),
         # ("/metadata/processing_information/input_burst_metadata/platform_id", None),
         # ("/metadata/processing_information/input_burst_metadata/iw2_mid_range", None),
         (
-            "/science/LSAR/GSLC/metadata/sourceData/processingInformation/parameters/frequencyA/slantRange",
+            f"/science/LSAR/GSLC/metadata/sourceData/processingInformation/parameters/{frequency}/slantRange",
             None,
         ),
         ("/science/LSAR/identification/productSpecificationVersion", None),
@@ -2054,6 +2148,7 @@ def create_compressed_products(
     output_dir: Filename,
     cslc_file_list: Sequence[Path],
     max_workers: int = 3,
+    subdataset: str = NISAR_DATASET_NAME,
 ) -> list[Path]:
     """Create all compressed SLC output products.
 
@@ -2070,6 +2165,9 @@ def create_compressed_products(
     max_workers : int
         Number of parallel threads to use to create products.
         Default is 2.
+    subdataset : str
+        HDF5 path of the SLC dataset (`input_options.subdataset`), which sets the
+        frequency/polarization the compressed SLCs are written under.
 
     Returns
     -------
@@ -2077,32 +2175,55 @@ def create_compressed_products(
         Paths to output compressed SLC files
 
     """
-    compressed_slc_infos = []
-    for _, comp_slc_files in comp_slc_dict.items():
-        for comp_slc_file in comp_slc_files:
-            # Pick out the one that matches the current date
-            ref_date = get_dates(comp_slc_file)[0]
-            valid_date_files = filter_by_date(cslc_file_list, [ref_date])
-            # matching_files = filter_by_burst_id(valid_date_files, burst_id)
-            msg = f"Found {len(valid_date_files)} matching CSLC files for{ref_date}"
-            logger.info(msg)
-            logger.info(valid_date_files)
+    # One mask for all the compressed SLCs of this run: valid where every input is
+    # valid (the masks change from one acquisition to the next).
+    with tempfile.TemporaryDirectory(dir=output_dir, prefix=".mask_") as mask_dir:
+        mask_file: Optional[Path] = None
+        try:
+            # Real GSLCs first: the first one sets the grid of the combined mask
+            mask_inputs = sorted(
+                cslc_file_list, key=lambda f: "compressed" in str(f).lower()
+            )
+            combined_mask = combine_gslc_masks(
+                mask_inputs, frequency=subdataset.split("/")[-2]
+            )
+            mask_file = Path(mask_dir) / "combined_gslc_mask.tif"
+            combined_mask.rio.to_raster(mask_file, compress="LZW")
+        except Exception as e:
+            logger.warning(
+                f"Could not make the combined GSLC mask: {e}; compressed SLCs will"
+                " not store a mask"
+            )
+            mask_file = None
 
-            cur_opera_cslc = valid_date_files[-1]
-            c = CompressedSLCInfo(comp_slc_file, output_dir, cur_opera_cslc)
-            compressed_slc_infos.append(c)
+        compressed_slc_infos = []
+        for _, comp_slc_files in comp_slc_dict.items():
+            for comp_slc_file in comp_slc_files:
+                # Pick out the one that matches the current date
+                ref_date = get_dates(comp_slc_file)[0]
+                valid_date_files = filter_by_date(cslc_file_list, [ref_date])
+                # matching_files = filter_by_burst_id(valid_date_files, burst_id)
+                msg = f"Found {len(valid_date_files)} matching CSLC files for{ref_date}"
+                logger.info(msg)
+                logger.info(valid_date_files)
 
-    # executor_class = (
-    #     ProcessPoolExecutor if max_workers > 1 else DummyProcessPoolExecutor
-    # )
-    executor_class = DummyProcessPoolExecutor
-    ctx = get_context("spawn")
+                cur_opera_cslc = valid_date_files[-1]
+                c = CompressedSLCInfo(
+                    comp_slc_file, output_dir, cur_opera_cslc, subdataset, mask_file
+                )
+                compressed_slc_infos.append(c)
 
-    with executor_class(
-        max_workers=max_workers,
-        mp_context=ctx,
-    ) as executor:
-        results = list(executor.map(process_compressed_slc, compressed_slc_infos))
+        # executor_class = (
+        #     ProcessPoolExecutor if max_workers > 1 else DummyProcessPoolExecutor
+        # )
+        executor_class = DummyProcessPoolExecutor
+        ctx = get_context("spawn")
+
+        with executor_class(
+            max_workers=max_workers,
+            mp_context=ctx,
+        ) as executor:
+            results = list(executor.map(process_compressed_slc, compressed_slc_infos))
 
     logger.info("Finished creating all compressed SLC products.")
     return results

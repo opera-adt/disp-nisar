@@ -3,13 +3,20 @@ from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+import rioxarray  # noqa: F401  (registers the `.rio` accessor)
+import xarray as xr
 from dolphin._types import Filename, PathOrStr
 from dolphin.io import format_nc_filename, load_gdal, write_arr
 
 # from opera_utils import group_by_burst
 from scipy import ndimage
 
+from ._common import GSLC_MASK_DSET
+
 logger = logging.getLogger(__name__)
+
+# Value used in a GSLC `mask` dataset for pixels outside the radar extent (fill)
+GSLC_MASK_FILL = 255
 
 
 def create_mask_from_distance(
@@ -170,3 +177,145 @@ def create_layover_shadow_masks(
     output_files.append(out_file)
 
     return output_files
+
+
+def read_gslc_validity_mask(
+    gslc_file: PathOrStr,
+    frequency: str = "frequencyA",
+    strides: tuple[int, int] = (1, 1),
+) -> xr.DataArray:
+    """Read the validity mask of a GSLC (or a compressed SLC) on its native grid.
+
+    Compressed SLCs store a `mask` dataset in the same place and encoding as a GSLC,
+    so the same reader handles both.
+
+    In the `mask` dataset, valid pixels have a subswath number >= 1, invalid pixels
+    are 0, and 255 is fill (outside the radar extent).
+
+    Parameters
+    ----------
+    gslc_file : PathOrStr
+        Path to the GSLC (or compressed SLC) HDF5 file. Can be remote.
+    frequency : str
+        Frequency layer to read, e.g. "frequencyA".
+    strides : tuple[int, int]
+        (row, column) strides applied while reading.
+
+    Returns
+    -------
+    xr.DataArray
+        uint8 array with 1 where the pixel is valid and 0 elsewhere, with CRS and
+        coordinates attached.
+
+    """
+    from ._streaming import open_h5_file
+
+    sy, sx = strides
+    with open_h5_file(gslc_file, "r") as f:
+        grp = f[f"science/LSAR/GSLC/grids/{frequency}"]
+        raw = grp[GSLC_MASK_DSET][::sy, ::sx]
+        x = grp["xCoordinates"][::sx]
+        y = grp["yCoordinates"][::sy]
+        epsg = int(grp["projection"][()])
+
+    valid = (raw >= 1) & (raw != GSLC_MASK_FILL)
+    return xr.DataArray(
+        valid.astype(np.uint8),
+        dims=("y", "x"),
+        coords={"y": y, "x": x},
+        attrs={"long_name": "valid sample mask"},
+    ).rio.write_crs(f"EPSG:{epsg}")
+
+
+def _mask_values_on_grid(mask: xr.DataArray, ref: xr.DataArray) -> np.ndarray:
+    """Get the values of `mask` on the grid of `ref`.
+
+    Pixels of `ref` that `mask` does not cover are returned as valid (1), so an input
+    with a smaller footprint (e.g. cropped to the output bounds) does not mask the
+    rest of the frame.
+    """
+    if (
+        mask.shape == ref.shape
+        and mask.rio.crs == ref.rio.crs
+        and np.allclose(mask.x, ref.x, atol=1e-3)
+        and np.allclose(mask.y, ref.y, atol=1e-3)
+    ):
+        return mask.values
+
+    from rasterio.enums import Resampling
+
+    matched = mask.rio.reproject_match(
+        ref, resampling=Resampling.nearest, nodata=GSLC_MASK_FILL
+    )
+    return np.where(matched.values == GSLC_MASK_FILL, 1, matched.values).astype(
+        np.uint8
+    )
+
+
+def combine_gslc_masks(
+    gslc_files: Sequence[PathOrStr],
+    frequency: str = "frequencyA",
+    strides: tuple[int, int] = (1, 1),
+) -> xr.DataArray:
+    """Combine the validity masks of all inputs into one.
+
+    The masks differ from one acquisition to the next, so a pixel is kept only if it
+    is valid in every input. The result is on the grid of the first readable input;
+    inputs on another grid are resampled to it (nearest neighbor).
+
+    Inputs whose mask cannot be read (e.g. no `mask` dataset) are skipped with a
+    warning.
+
+    Parameters
+    ----------
+    gslc_files : Sequence[PathOrStr]
+        GSLCs and/or compressed SLCs. Put a real GSLC first, since its grid is used
+        as the reference.
+    frequency : str
+        Frequency layer to read, e.g. "frequencyA".
+    strides : tuple[int, int]
+        (row, column) strides applied while reading.
+
+    Returns
+    -------
+    xr.DataArray
+        uint8 array, 1 where the pixel is valid in all inputs.
+
+    Raises
+    ------
+    ValueError
+        If none of the masks could be read.
+
+    """
+    combined: xr.DataArray | None = None
+    num_used = 0
+    for f in gslc_files:
+        try:
+            mask = read_gslc_validity_mask(f, frequency=frequency, strides=strides)
+        except Exception as e:
+            logger.warning(f"Could not read the mask of {f}: {e}; skipping it")
+            continue
+        if combined is None:
+            combined = mask
+        else:
+            values = _mask_values_on_grid(mask, combined)
+            combined = combined.copy(data=np.bitwise_and(combined.values, values))
+        num_used += 1
+
+    if combined is None:
+        msg = f"No readable GSLC masks in {len(gslc_files)} input files"
+        raise ValueError(msg)
+    logger.info(f"Combined the GSLC masks of {num_used}/{len(gslc_files)} inputs")
+    return combined
+
+
+def mask_on_grid(
+    mask: xr.DataArray, y: np.ndarray, x: np.ndarray, crs_wkt: str
+) -> np.ndarray:
+    """Get `mask` as a uint8 array on the grid defined by the `y`, `x` centers."""
+    template = xr.DataArray(
+        np.zeros((len(y), len(x)), dtype=np.uint8),
+        dims=("y", "x"),
+        coords={"y": y, "x": x},
+    ).rio.write_crs(crs_wkt)
+    return _mask_values_on_grid(mask, template)

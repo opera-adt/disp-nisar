@@ -101,3 +101,172 @@ def test_ionospheric_correction_label(gunw_files, method, label):
         get_ionosphere_options=lambda: IonosphereOptions(method=method),
     )
     assert product._ionospheric_correction_label(runconfig) == label
+def test_compressed_slc_has_gslc_layout(tmp_path):
+    """Compressed SLCs are readable by the same code that reads real GSLCs."""
+    import numpy as np
+    from dolphin import io
+
+    from disp_nisar._common import NISAR_DATASET_NAME
+    from disp_nisar._ps import run_combine
+    from disp_nisar._utils import _frequency_to_wavelength, get_nisar_frame_bbox
+
+    [out] = product.create_compressed_products(
+        {"": [TEST_OUTPUT_CGSLC_FILE]},
+        cslc_file_list=[TEST_GSLC_FILE],
+        output_dir=tmp_path,
+    )
+    grid = "/science/LSAR/GSLC/grids/frequencyA"
+    with h5py.File(out) as hf:
+        for name in (
+            "HH",
+            "amplitude_dispersion",
+            "xCoordinates",
+            "yCoordinates",
+            "xCoordinateSpacing",
+            "yCoordinateSpacing",
+            "projection",
+            "centerFrequency",
+        ):
+            assert f"{grid}/{name}" in hf, name
+        assert (
+            int(hf[f"{grid}/projection"][()])
+            == hf[f"{grid}/projection"].attrs["epsg_code"]
+        )
+        # The old COMPASS-style names are gone
+        assert "x_coordinates" not in hf[grid]
+        assert "data" not in hf
+
+    # Geometry matches the processed raster it was made from
+    epsg, bbox = get_nisar_frame_bbox(out)
+    assert epsg == io.get_raster_crs(TEST_OUTPUT_CGSLC_FILE).to_epsg()
+    left, bottom, right, top = io.get_raster_bounds(TEST_OUTPUT_CGSLC_FILE)
+    np.testing.assert_allclose(
+        [bbox.left, bbox.bottom, bbox.right, bbox.top],
+        [left, bottom, right, top],
+    )
+    # Wavelength is read from the GSLC-location centerFrequency, copied from the GSLC
+    assert _frequency_to_wavelength("frequencyA", out) == _frequency_to_wavelength(
+        "frequencyA", TEST_GSLC_FILE
+    )
+
+    # And the dispersion/SLC are found where `run_combine` looks for them
+    shape = io.get_raster_xysize(TEST_OUTPUT_CGSLC_FILE)[::-1]
+    mean = tmp_path / "mean.tif"
+    disp = tmp_path / "disp.tif"
+    for f in (mean, disp):
+        io.write_arr(
+            arr=np.ones(shape, dtype="float32"),
+            output_name=f,
+            like_filename=TEST_OUTPUT_CGSLC_FILE,
+        )
+    out_disp, out_mean = run_combine(
+        mean, disp, [out], num_slc=2, subdataset=NISAR_DATASET_NAME
+    )
+    assert out_disp.exists() and out_mean.exists()
+
+
+def test_nodata_mask_keeps_exact_zero_pixels():
+    """The reference pixel is exactly 0.0 and must not be treated as nodata."""
+    import numpy as np
+
+    arr = np.ma.masked_array(
+        [[0.0, 1.0], [2.0, 3.0]], mask=[[False, False], [True, False]]
+    )
+    mask = product.nodata_mask(arr)
+    assert mask.tolist() == [[False, False], [True, False]]
+    # No mask at all -> nothing is nodata, even where the values are zero
+    assert not product.nodata_mask(np.ma.masked_array(np.zeros((2, 2)))).any()
+
+
+def test_compressed_slc_stores_combined_mask(tmp_path):
+    """The compressed SLC stores the combined input mask as a GSLC-style `mask`."""
+    import numpy as np
+    from dolphin import io
+
+    from disp_nisar._masking import combine_gslc_masks, read_gslc_validity_mask
+
+    xsize, ysize = io.get_raster_xysize(TEST_OUTPUT_CGSLC_FILE)
+    gt = io.get_raster_gt(TEST_OUTPUT_CGSLC_FILE)
+    epsg = io.get_raster_crs(TEST_OUTPUT_CGSLC_FILE).to_epsg()
+
+    def make_input(name, mask):
+        path = tmp_path / name
+        with h5py.File(path, "w") as hf:
+            g = hf.create_group("science/LSAR/GSLC/grids/frequencyA")
+            g["mask"] = mask
+            g["xCoordinates"] = gt[0] + gt[1] * (np.arange(xsize) + 0.5)
+            g["yCoordinates"] = gt[3] + gt[5] * (np.arange(ysize) + 0.5)
+            g["projection"] = np.int32(epsg)
+        return path
+
+    m1 = np.ones((ysize, xsize), dtype="uint8")
+    m1[:5, :] = 0
+    m2 = np.ones((ysize, xsize), dtype="uint8")
+    m2[:, :7] = 255
+    # The first input has the date of the compressed SLC, so its metadata is copied
+    in1 = make_input("NISAR_L2_GSLC_NI_F150_20060630T061920Z_20240504T181714Z.h5", m1)
+    in2 = make_input("NISAR_L2_GSLC_NI_F150_20060712T061920Z_20240504T181714Z.h5", m2)
+
+    [out] = product.create_compressed_products(
+        {"": [TEST_OUTPUT_CGSLC_FILE]},
+        cslc_file_list=[in1, in2],
+        output_dir=tmp_path,
+    )
+    # Not left behind in the output directory
+    assert not list(tmp_path.glob(".mask_*"))
+
+    with h5py.File(out) as hf:
+        stored = hf["/science/LSAR/GSLC/grids/frequencyA/mask"][:]
+    expected = np.ones((ysize, xsize), dtype="uint8")
+    expected[:5, :] = 0
+    expected[:, :7] = 0
+    np.testing.assert_array_equal(stored >= 1, expected.astype(bool))
+    assert stored.dtype == np.uint8
+
+    # Read back like a GSLC mask, and combine it with a new acquisition in the next run
+    np.testing.assert_array_equal(read_gslc_validity_mask(out).values, expected)
+    m3 = np.ones((ysize, xsize), dtype="uint8")
+    m3[-1, :] = 0
+    in3 = make_input("NISAR_L2_GSLC_NI_F150_20060724T061920Z_20240504T181714Z.h5", m3)
+    nxt = combine_gslc_masks([in3, out]).values
+    expected_next = expected.copy()
+    expected_next[-1, :] = 0
+    np.testing.assert_array_equal(nxt, expected_next)
+
+
+@pytest.mark.parametrize("polarization", ["HH", "VV", "HV"])
+def test_identification_polarization_follows_config(tmp_path, polarization):
+    """Input and output polarization in the product come from the configured one."""
+    import datetime
+    from types import SimpleNamespace
+
+    runconfig = SimpleNamespace(
+        input_file_group=SimpleNamespace(
+            frame_id=150,
+            polarization=polarization,
+            gslc_file_list=[TEST_GSLC_FILE],
+        ),
+        product_path_group=SimpleNamespace(product_version="0.1"),
+    )
+    out = tmp_path / "id.nc"
+    t = datetime.datetime(2024, 1, 1)
+    product._create_identification_group(
+        output_name=out,
+        pge_runconfig=runconfig,
+        radar_wavelength=0.24,
+        reference_orbit_type="precise",
+        secondary_orbit_type="precise",
+        reference_start_time=t,
+        reference_end_time=t,
+        secondary_start_time=t,
+        secondary_end_time=t,
+        footprint_wkt="",
+        product_bounds=(0.0, 0.0, 1.0, 1.0),
+        num_nodata_pixels=0,
+        average_temporal_coherence=0.9,
+        processing_start_datetime=t,
+    )
+    with h5py.File(out) as hf:
+        grp = hf[product.IDENTIFICATION_GROUP_NAME]
+        for name in ("source_data_polarization", "product_data_polarization"):
+            assert grp[name][()].decode() == polarization

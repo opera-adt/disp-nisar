@@ -13,6 +13,7 @@ from dolphin.utils import DummyProcessPoolExecutor
 from dolphin.workflows.config import DisplacementWorkflow
 from dolphin.workflows.wrapped_phase import _get_mask
 
+from ._common import AMPLITUDE_DISPERSION_DSET, NISAR_DATASET_NAME
 from ._streaming import XarrayStackReader, is_remote_url
 
 logger = logging.getLogger(__name__)
@@ -179,7 +180,7 @@ def run_combine(
     compressed_slc_files: list[PathOrStr],
     num_slc: int,
     weight_scheme: WeightScheme = WeightScheme.EXPONENTIAL,
-    subdataset: str = "/science/LSAR/GSLC/grids/frequencyA/HH",
+    subdataset: str = NISAR_DATASET_NAME,
     n_workers: int | None = None,
 ) -> tuple[Path, Path]:
     out_dispersion = cur_dispersion.parent / "combined_dispersion.tif"
@@ -187,6 +188,11 @@ def run_combine(
     if out_dispersion.exists() and out_mean.exists():
         logger.info(f"{out_mean} and {out_dispersion} exist, skipping")
         return out_dispersion, out_mean
+
+    # The compressed SLC stores its dispersion next to the SLC dataset
+    dispersion_subdataset = (
+        f"{subdataset.rsplit('/', 1)[0]}/{AMPLITUDE_DISPERSION_DSET}"
+    )
 
     # Check if compressed files are remote
     has_remote_compressed = any(is_remote_url(f) for f in compressed_slc_files)
@@ -208,7 +214,7 @@ def run_combine(
         )
         reader_compslc_dispersion = XarrayStackReader(
             file_list=compressed_slc_files,
-            subdataset="/data/amplitude_dispersion",
+            subdataset=dispersion_subdataset,
             chunks=chunks_3d,
             nodata=np.nan,
             n_workers=n_workers,
@@ -221,7 +227,7 @@ def run_combine(
         )
         reader_compslc_dispersion = io.HDF5StackReader.from_file_list(
             file_list=compressed_slc_files,
-            dset_names="/data/amplitude_dispersion",
+            dset_names=dispersion_subdataset,
             nodata=np.nan,
         )
     reader_mean = io.RasterReader.from_file(cur_mean, band=1)
